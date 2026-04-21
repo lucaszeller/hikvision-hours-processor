@@ -1,7 +1,6 @@
-venv/
 __pycache__/
 *.pyc
-*.xlsx
-dist/
+.venv/
+.pytest_cache/
 build/
-.env
+dist/
