@@ -122,7 +122,7 @@ Se genera un Excel con 3 hojas (campos y títulos en español):
 ## Inconsistencias detectadas
 
 - Cantidad impar de fichadas en el día.
-- Duplicados cercanos (por defecto, <= 2 minutos).
+- Duplicados cercanos (por defecto, hasta 2 minutos).
 - Orden inválido (salida anterior o igual a entrada).
 - Datos incompletos (filas inválidas se descartan y si no queda nada útil se informa error).
 
