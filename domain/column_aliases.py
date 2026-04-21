@@ -1,0 +1,45 @@
+from __future__ import annotations
+
+COLUMN_CANDIDATES = {
+    "employee_id": [
+        "legajo",
+        "employee id",
+        "employeeid",
+        "emp id",
+        "user id",
+        "userid",
+        "id empleado",
+        "person id",
+        "staff id",
+        "codigo",
+    ],
+    "employee_name": [
+        "nombre",
+        "employee name",
+        "name",
+        "apellido y nombre",
+        "person name",
+        "staff name",
+        "empleado",
+    ],
+    "punch_datetime": [
+        "fecha y hora",
+        "datetime",
+        "date time",
+        "timestamp",
+        "time",
+        "punch time",
+        "check time",
+        "record time",
+        "fichada",
+        "fecha hora",
+    ],
+    "event_type": [
+        "event type",
+        "tipo",
+        "tipo de evento",
+        "status",
+        "state",
+        "verify mode",
+    ],
+}
