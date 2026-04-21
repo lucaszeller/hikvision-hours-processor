@@ -4,6 +4,19 @@ from datetime import timedelta
 
 import pandas as pd
 
+DAILY_COLUMNS = [
+    "Legajo",
+    "Nombre",
+    "Fecha",
+    "Cantidad de fichadas",
+    "Marcaciones (I/S)",
+    "Tramos trabajados",
+    "Horas totales",
+    "Minutos totales",
+]
+MONTHLY_COLUMNS = ["Legajo", "Nombre", "Minutos totales", "Horas mensuales"]
+INCONSISTENCY_COLUMNS = ["Legajo", "Nombre", "Fecha", "Tipo de inconsistencia", "Detalle"]
+
 
 def _timedelta_to_hhmm(delta: timedelta) -> str:
     total_seconds = int(delta.total_seconds())
@@ -92,9 +105,9 @@ def process_punches(df: pd.DataFrame, duplicate_window_minutes: int = 2) -> tupl
             }
         )
 
-    daily_df = pd.DataFrame(rows_daily).sort_values(["Nombre", "Fecha"])
-
+    daily_df = pd.DataFrame(rows_daily, columns=DAILY_COLUMNS)
     if not daily_df.empty:
+        daily_df = daily_df.sort_values(["Nombre", "Fecha"])
         monthly_df = (
             daily_df.groupby(["Legajo", "Nombre"], as_index=False)["Minutos totales"]
             .sum()
@@ -105,7 +118,7 @@ def process_punches(df: pd.DataFrame, duplicate_window_minutes: int = 2) -> tupl
         )
         rows_monthly = monthly_df.to_dict(orient="records")
 
-    inconsistencies_df = pd.DataFrame(inconsistencies)
-    monthly_df = pd.DataFrame(rows_monthly)
+    inconsistencies_df = pd.DataFrame(inconsistencies, columns=INCONSISTENCY_COLUMNS)
+    monthly_df = pd.DataFrame(rows_monthly, columns=MONTHLY_COLUMNS)
 
     return daily_df, monthly_df, inconsistencies_df

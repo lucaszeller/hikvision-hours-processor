@@ -134,7 +134,7 @@ Para regenerar ejemplos:
 python samples/generate_samples.py
 ```
 
-Archivos esperados:
+Archivos que se generan localmente (no versionados en Git):
 
 - `samples/sample_input.xlsx`
 - `samples/sample_output.xlsx`

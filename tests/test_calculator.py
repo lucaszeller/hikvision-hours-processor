@@ -51,3 +51,23 @@ def test_detects_odd_punch_count() -> None:
 
     assert not inconsistencies.empty
     assert "Cantidad impar" in set(inconsistencies["Tipo de inconsistencia"])
+
+
+def test_empty_input_returns_empty_dataframes_with_expected_columns() -> None:
+    df = pd.DataFrame(columns=["employee_id", "employee_name", "punch_datetime", "work_date"])
+
+    daily, monthly, inconsistencies = process_punches(df)
+
+    assert list(daily.columns) == [
+        "Legajo",
+        "Nombre",
+        "Fecha",
+        "Cantidad de fichadas",
+        "Marcaciones (I/S)",
+        "Tramos trabajados",
+        "Horas totales",
+        "Minutos totales",
+    ]
+    assert list(monthly.columns) == ["Legajo", "Nombre", "Minutos totales", "Horas mensuales"]
+    assert list(inconsistencies.columns) == ["Legajo", "Nombre", "Fecha", "Tipo de inconsistencia", "Detalle"]
+    assert daily.empty and monthly.empty and inconsistencies.empty
