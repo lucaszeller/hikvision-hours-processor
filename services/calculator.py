@@ -143,7 +143,6 @@ def process_punches(
                 "Tramos trabajados": " | ".join(segments),
                 "Horas totales": _timedelta_to_hhmm(day_total),
                 "Minutos totales": int(day_total.total_seconds() // 60),
-                "_total_seconds": int(day_total.total_seconds()),
             }
         )
 
@@ -153,16 +152,13 @@ def process_punches(
         daily_df = daily_df.sort_values(["Nombre", "Fecha"])
 
         monthly_df = (
-            daily_df.groupby(["Legajo", "Nombre"], as_index=False)["_total_seconds"]
+            daily_df.groupby(["Legajo", "Nombre"], as_index=False)["Minutos totales"]
             .sum()
             .sort_values(["Nombre"])
         )
-
-        monthly_df["Minutos totales"] = (monthly_df["_total_seconds"] // 60).astype(int)
         monthly_df["Horas mensuales"] = monthly_df["Minutos totales"].apply(
             lambda mins: _timedelta_to_hhmm(timedelta(minutes=int(mins)))
         )
-        monthly_df = monthly_df.drop(columns=["_total_seconds"])
         monthly_df = monthly_df[MONTHLY_COLUMNS]
         daily_df = daily_df[DAILY_COLUMNS]
     else:
