@@ -4,7 +4,6 @@ from datetime import timedelta
 
 import pandas as pd
 
-codex/create-desktop-app-for-attendance-processing-18do52
 DAILY_COLUMNS = [
     "Legajo",
     "Nombre",
@@ -28,7 +27,6 @@ def _timedelta_to_hhmm(delta: timedelta) -> str:
     return f"{hours:02d}:{minutes:02d}"
 
 
- codex/create-desktop-app-for-attendance-processing-18do52
 def _build_marks_text(timestamps: list) -> str:
     marks: list[str] = []
     for idx, ts in enumerate(timestamps, start=1):
@@ -53,7 +51,6 @@ def process_punches(df: pd.DataFrame, duplicate_window_minutes: int = 2) -> tupl
             if diff <= timedelta(minutes=duplicate_window_minutes):
                 inconsistencies.append(
                     {
-codex/create-desktop-app-for-attendance-processing-18do52
                         "Legajo": employee_id,
                         "Nombre": employee_name,
                         "Fecha": work_date,
@@ -72,7 +69,6 @@ codex/create-desktop-app-for-attendance-processing-18do52
         if len(timestamps) % 2 != 0:
             inconsistencies.append(
                 {
-codex/create-desktop-app-for-attendance-processing-18do52
                     "Legajo": employee_id,
                     "Nombre": employee_name,
                     "Fecha": work_date,
@@ -98,7 +94,6 @@ codex/create-desktop-app-for-attendance-processing-18do52
             if end <= start:
                 inconsistencies.append(
                     {
- codex/create-desktop-app-for-attendance-processing-18do52
                         "Legajo": employee_id,
                         "Nombre": employee_name,
                         "Fecha": work_date,
@@ -118,7 +113,6 @@ main
             stretch = end - start
             day_total += stretch
             segments.append(
- codex/create-desktop-app-for-attendance-processing-18do52
                 f"Ingreso {start.strftime('%H:%M')} - Salida {end.strftime('%H:%M')} ({_timedelta_to_hhmm(stretch)})"
 
                 f"{start.strftime('%H:%M')} - {end.strftime('%H:%M')} ({_timedelta_to_hhmm(stretch)})"
@@ -127,7 +121,6 @@ main
 
         rows_daily.append(
             {
- codex/create-desktop-app-for-attendance-processing-18do52
                 "Legajo": employee_id,
                 "Nombre": employee_name,
                 "Fecha": work_date,
@@ -172,7 +165,7 @@ main
         )
         rows_monthly = monthly_df.to_dict(orient="records")
 
-codex/create-desktop-app-for-attendance-processing-18do52
+
     inconsistencies_df = pd.DataFrame(inconsistencies, columns=INCONSISTENCY_COLUMNS)
     monthly_df = pd.DataFrame(rows_monthly, columns=MONTHLY_COLUMNS)
 
