@@ -43,6 +43,26 @@ def _build_marks_text(timestamps: list) -> str:
     return " | ".join(marks)
 
 
+def _remove_near_duplicates(
+    timestamps: list,
+    duplicate_window_minutes: int,
+) -> tuple[list, list[timedelta]]:
+    if not timestamps:
+        return [], []
+
+    clean = [timestamps[0]]
+    duplicate_diffs: list[timedelta] = []
+
+    for ts in timestamps[1:]:
+        diff = ts - clean[-1]
+        if diff <= timedelta(minutes=duplicate_window_minutes):
+            duplicate_diffs.append(diff)
+            continue
+        clean.append(ts)
+
+    return clean, duplicate_diffs
+
+
 def process_punches(
     df: pd.DataFrame,
     duplicate_window_minutes: int = 2,
@@ -52,25 +72,25 @@ def process_punches(
 
     grouped = (
         df.sort_values("punch_datetime")
-        .groupby(["ID de persona", "Nombre"], sort=True)
+        .groupby(["employee_id", "employee_name", "work_date"], sort=True)
     )
 
     for (employee_id, employee_name, work_date), group in grouped:
-        timestamps = list(group["punch_datetime"])
+        raw_timestamps = sorted([ts for ts in group["punch_datetime"] if pd.notna(ts)])
+        timestamps, duplicate_diffs = _remove_near_duplicates(
+            raw_timestamps, duplicate_window_minutes
+        )
 
-        for i in range(1, len(timestamps)):
-            diff = timestamps[i] - timestamps[i - 1]
-
-            if diff <= timedelta(minutes=duplicate_window_minutes):
-                inconsistencies.append(
-                    {
-                        "Legajo": employee_id,
-                        "Nombre": employee_name,
-                        "Fecha": work_date,
-                        "Tipo de inconsistencia": "Duplicado cercano",
-                        "Detalle": f"Fichadas con diferencia de {diff}.",
-                    }
-                )
+        for diff in duplicate_diffs:
+            inconsistencies.append(
+                {
+                    "Legajo": employee_id,
+                    "Nombre": employee_name,
+                    "Fecha": work_date,
+                    "Tipo de inconsistencia": "Duplicado cercano",
+                    "Detalle": f"Fichadas con diferencia de {diff}.",
+                }
+            )
 
         if len(timestamps) % 2 != 0:
             inconsistencies.append(
@@ -123,26 +143,30 @@ def process_punches(
                 "Tramos trabajados": " | ".join(segments),
                 "Horas totales": _timedelta_to_hhmm(day_total),
                 "Minutos totales": int(day_total.total_seconds() // 60),
+                "_total_seconds": int(day_total.total_seconds()),
             }
         )
 
-    daily_df = pd.DataFrame(rows_daily, columns=DAILY_COLUMNS)
+    daily_df = pd.DataFrame(rows_daily)
 
     if not daily_df.empty:
         daily_df = daily_df.sort_values(["Nombre", "Fecha"])
 
         monthly_df = (
-            daily_df.groupby(["Legajo", "Nombre"], as_index=False)["Minutos totales"]
+            daily_df.groupby(["Legajo", "Nombre"], as_index=False)["_total_seconds"]
             .sum()
             .sort_values(["Nombre"])
         )
 
+        monthly_df["Minutos totales"] = (monthly_df["_total_seconds"] // 60).astype(int)
         monthly_df["Horas mensuales"] = monthly_df["Minutos totales"].apply(
             lambda mins: _timedelta_to_hhmm(timedelta(minutes=int(mins)))
         )
-
+        monthly_df = monthly_df.drop(columns=["_total_seconds"])
         monthly_df = monthly_df[MONTHLY_COLUMNS]
+        daily_df = daily_df[DAILY_COLUMNS]
     else:
+        daily_df = pd.DataFrame(columns=DAILY_COLUMNS)
         monthly_df = pd.DataFrame(columns=MONTHLY_COLUMNS)
 
     inconsistencies_df = pd.DataFrame(inconsistencies, columns=INCONSISTENCY_COLUMNS)
