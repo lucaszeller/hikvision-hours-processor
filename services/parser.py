@@ -7,7 +7,9 @@ import pandas as pd
 
 from domain.column_aliases import COLUMN_CANDIDATES
 
-REQUIRED_COLUMNS = ("employee_id", "employee_name", "punch_datetime")
+REQUIRED_COLUMNS = ("employee_id", "employee_name")
+DATETIME_COLUMNS = ("punch_datetime",)
+DATE_TIME_PART_COLUMNS = ("punch_date", "punch_time")
 
 
 class ParsingError(Exception):
@@ -33,22 +35,51 @@ def _column_match_score(column: str, aliases: list[str]) -> int:
     return best
 
 
+def _best_column(columns: list[str], aliases: list[str]) -> str | None:
+    ranked = sorted(columns, key=lambda c: _column_match_score(c, aliases), reverse=True)
+    if ranked and _column_match_score(ranked[0], aliases) > 0:
+        return ranked[0]
+    return None
+
+
 def detect_column_mapping(columns: list[str]) -> dict[str, str]:
     mapping: dict[str, str] = {}
     for canonical_name, aliases in COLUMN_CANDIDATES.items():
-        ranked = sorted(columns, key=lambda c: _column_match_score(c, aliases), reverse=True)
-        if ranked and _column_match_score(ranked[0], aliases) > 0:
-            mapping[canonical_name] = ranked[0]
+        matched = _best_column(columns, aliases)
+        if matched:
+            mapping[canonical_name] = matched
 
-    missing = [col for col in REQUIRED_COLUMNS if col not in mapping]
-    if missing:
+    missing_required = [col for col in REQUIRED_COLUMNS if col not in mapping]
+    has_datetime = all(col in mapping for col in DATETIME_COLUMNS)
+    has_split_datetime = all(col in mapping for col in DATE_TIME_PART_COLUMNS)
+
+    if missing_required or (not has_datetime and not has_split_datetime):
+        details = []
+        if missing_required:
+            details.append("columnas obligatorias: " + ", ".join(missing_required))
+        if not has_datetime and not has_split_datetime:
+            details.append("fecha/hora (columna unificada o separadas)")
+
         raise ParsingError(
-            "No se pudieron detectar columnas obligatorias: "
-            + ", ".join(missing)
-            + ". Revisá encabezados del Excel de Hikvision."
+            "No se pudieron detectar columnas necesarias (" + "; ".join(details) + "). "
+            "Revisá encabezados del Excel de Hikvision."
         )
 
     return mapping
+
+
+def _read_hikvision_sheet(path: Path) -> pd.DataFrame:
+    for header in (0, 1, 2, 3):
+        df = pd.read_excel(path, header=header)
+        columns = [str(c) for c in df.columns]
+        try:
+            detect_column_mapping(columns)
+            return df
+        except ParsingError:
+            continue
+    raise ParsingError(
+        "No se pudo detectar una fila de encabezados compatible en el Excel (probadas filas 1 a 4)."
+    )
 
 
 def load_hikvision_excel(file_path: str | Path) -> pd.DataFrame:
@@ -56,7 +87,7 @@ def load_hikvision_excel(file_path: str | Path) -> pd.DataFrame:
     if not path.exists():
         raise ParsingError(f"No existe el archivo: {path}")
 
-    df = pd.read_excel(path)
+    df = _read_hikvision_sheet(path)
     if df.empty:
         raise ParsingError("El archivo no contiene filas.")
 
@@ -65,7 +96,16 @@ def load_hikvision_excel(file_path: str | Path) -> pd.DataFrame:
     canonical_df = pd.DataFrame()
     canonical_df["employee_id"] = df[mapping["employee_id"]].astype(str).str.strip()
     canonical_df["employee_name"] = df[mapping["employee_name"]].astype(str).str.strip()
-    canonical_df["punch_datetime"] = pd.to_datetime(df[mapping["punch_datetime"]], errors="coerce")
+
+    if "punch_datetime" in mapping:
+        canonical_df["punch_datetime"] = pd.to_datetime(df[mapping["punch_datetime"]], errors="coerce")
+    else:
+        date_part = pd.to_datetime(df[mapping["punch_date"]], errors="coerce").dt.date
+        time_part = pd.to_datetime(df[mapping["punch_time"]], errors="coerce").dt.time
+        canonical_df["punch_datetime"] = pd.to_datetime(
+            date_part.astype(str) + " " + time_part.astype(str), errors="coerce"
+        )
+
     canonical_df["event_type"] = (
         df[mapping["event_type"]].astype(str).str.strip() if "event_type" in mapping else None
     )
