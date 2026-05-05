@@ -3,3 +3,4 @@ openpyxl>=3.1.0
 customtkinter>=5.2.0
 pytest>=8.0.0
 pyinstaller>=6.0.0
+tkcalendar>=1.6.1

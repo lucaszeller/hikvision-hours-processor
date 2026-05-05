@@ -13,6 +13,16 @@ Aplicacion interna en Python para procesar reportes de horas de Hikvision/iVMS-4
 7. Registrar inconsistencias sin detener el proceso.
 8. Exportar Excel final con hojas Diario, Mensual e Inconsistencias.
 
+## Excepciones
+
+- Se pueden cargar desde archivo `.csv/.xls/.xlsx` con columnas:
+  - `ID de persona` (opcional, vacio = aplica a todos)
+  - `Fecha` (obligatorio, formato recomendado `YYYY-MM-DD`)
+  - `Tipo` (obligatorio; por ejemplo `Feriado`, `Vacaciones`, `Enfermedad`, `Permiso`)
+  - `Detalle` (opcional)
+- Tambien se pueden cargar manualmente desde la UI con formato por linea:
+  - `ID|YYYY-MM-DD|TIPO|DETALLE`
+
 ## Estructura
 
 - `main.py`: punto de entrada UI.

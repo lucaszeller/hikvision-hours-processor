@@ -7,6 +7,12 @@ from typing import Callable
 import pandas as pd
 
 from services.calculator import process_punches
+from services.exceptions import (
+    ExceptionConfigError,
+    load_exceptions_file,
+    merge_exceptions,
+    parse_manual_exceptions,
+)
 from services.exporter import export_report
 from services.parser import load_hikvision_excel
 
@@ -178,6 +184,8 @@ class ProcessorService:
         output_dir: str | Path | None = None,
         progress_callback: Callable[[int, str], None] | None = None,
         strict_mode: bool = False,
+        exceptions_file: str | Path | None = None,
+        manual_exceptions_text: str | None = None,
     ) -> Path:
         source = Path(input_path)
         target_dir = Path(output_dir) if output_dir is not None else source.parent
@@ -189,9 +197,30 @@ class ProcessorService:
             progress_callback(10, "Leyendo reporte Hikvision...")
         source_df = load_hikvision_excel(source)
 
+        file_exceptions = []
+        manual_exceptions = []
+
+        try:
+            if exceptions_file is not None:
+                if progress_callback:
+                    progress_callback(25, "Cargando excepciones desde archivo...")
+                file_exceptions = load_exceptions_file(exceptions_file)
+
+            if manual_exceptions_text and manual_exceptions_text.strip():
+                if progress_callback:
+                    progress_callback(35, "Cargando excepciones manuales...")
+                manual_exceptions = parse_manual_exceptions(manual_exceptions_text)
+        except ExceptionConfigError as exc:
+            raise ValidationError(str(exc)) from exc
+
+        merged_exceptions = merge_exceptions(file_exceptions, manual_exceptions)
+
         if progress_callback:
             progress_callback(55, "Calculando horas y detectando inconsistencias...")
-        daily_df, monthly_df, inconsistencies_df = process_punches(source_df)
+        daily_df, monthly_df, inconsistencies_df = process_punches(
+            source_df,
+            exceptions=merged_exceptions,
+        )
 
         if progress_callback:
             progress_callback(72, "Validando consistencia de resultados...")

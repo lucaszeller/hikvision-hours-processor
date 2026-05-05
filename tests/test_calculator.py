@@ -3,6 +3,7 @@ from __future__ import annotations
 import pandas as pd
 
 from services.calculator import process_punches
+from services.exceptions import WorkException
 
 
 def _base_input() -> pd.DataFrame:
@@ -53,7 +54,6 @@ def test_detects_required_inconsistencies_without_stopping_processing() -> None:
 
     daily, monthly, inconsistencies = process_punches(df)
 
-    # First row is valid, others should produce inconsistencies.
     assert len(daily) == 1
     assert len(monthly) == 1
     assert not inconsistencies.empty
@@ -64,6 +64,37 @@ def test_detects_required_inconsistencies_without_stopping_processing() -> None:
     assert "Fecha invalida" in issue_types
     assert "Ambos vacios" in issue_types
     assert "Salida menor que entrada" in issue_types
+
+
+def test_exception_replaces_missing_mark_inconsistency() -> None:
+    df = pd.DataFrame(
+        {
+            "employee_id": ["20"],
+            "employee_name": ["Ana"],
+            "department": ["A"],
+            "schedule": [""],
+            "work_date_raw": ["2026-05-01"],
+            "entry_time_raw": [""],
+            "exit_time_raw": [""],
+        }
+    )
+
+    exceptions = [
+        WorkException(
+            employee_id="20",
+            exception_date=pd.Timestamp("2026-05-01").date(),
+            exception_type="Feriado",
+            details="Dia del trabajador",
+        )
+    ]
+
+    daily, monthly, inconsistencies = process_punches(df, exceptions=exceptions)
+
+    assert daily.empty
+    assert monthly.empty
+    assert len(inconsistencies) == 1
+    assert inconsistencies.iloc[0]["Tipo de inconsistencia"] == "Excepcion aplicada"
+    assert "Feriado" in inconsistencies.iloc[0]["Detalle"]
 
 
 def test_empty_input_returns_empty_dataframes_with_expected_columns() -> None:

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import date, datetime
 
 import pandas as pd
+
+from services.exceptions import WorkException, build_exception_index, find_matching_exceptions
 
 DIARIO_COLUMNS = [
     "ID de persona",
@@ -97,9 +99,26 @@ def _inconsistency(
     )
 
 
-def process_punches(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+def _exception_summary(items: list[WorkException]) -> str:
+    parts = []
+    for item in items:
+        if item.details.strip():
+            parts.append(f"{item.exception_type} ({item.details})")
+        else:
+            parts.append(item.exception_type)
+    return " | ".join(parts)
+
+
+def process_punches(
+    df: pd.DataFrame,
+    exceptions: list[WorkException] | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     valid_segments: list[dict] = []
     inconsistencies: list[dict] = []
+
+    exceptions = exceptions or []
+    exceptions_index = build_exception_index(exceptions)
+    used_exception_keys: set[tuple[str | None, date, str, str]] = set()
 
     for _, row in df.iterrows():
         employee_id = str(row.get("employee_id", "")).strip()
@@ -132,6 +151,14 @@ def process_punches(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.Da
             )
 
         date_parsed = _parse_date(work_date_raw)
+        row_exceptions: list[WorkException] = []
+        if date_parsed is not None and employee_id != "":
+            row_exceptions = find_matching_exceptions(exceptions_index, employee_id, date_parsed.date())
+            for item in row_exceptions:
+                used_exception_keys.add(
+                    (item.employee_id, item.exception_date, item.exception_type.strip(), item.details.strip())
+                )
+
         if date_parsed is None:
             _inconsistency(
                 inconsistencies,
@@ -146,32 +173,65 @@ def process_punches(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.Da
         has_exit = not _is_blank(exit_raw)
 
         if not has_entry and not has_exit:
-            _inconsistency(
-                inconsistencies,
-                employee_id,
-                employee_name,
-                date_for_report,
-                "Ambos vacios",
-                "Faltan Registro de entrada y Registro de salida.",
-            )
+            if row_exceptions:
+                _inconsistency(
+                    inconsistencies,
+                    employee_id,
+                    employee_name,
+                    date_for_report,
+                    "Excepcion aplicada",
+                    "Se omitio inconsistencia de ausencia sin fichadas por excepcion: "
+                    + _exception_summary(row_exceptions),
+                )
+            else:
+                _inconsistency(
+                    inconsistencies,
+                    employee_id,
+                    employee_name,
+                    date_for_report,
+                    "Ambos vacios",
+                    "Faltan Registro de entrada y Registro de salida.",
+                )
         elif not has_entry:
-            _inconsistency(
-                inconsistencies,
-                employee_id,
-                employee_name,
-                date_for_report,
-                "Falta Registro de entrada",
-                "No se encontro hora de entrada.",
-            )
+            if row_exceptions:
+                _inconsistency(
+                    inconsistencies,
+                    employee_id,
+                    employee_name,
+                    date_for_report,
+                    "Excepcion aplicada",
+                    "Se omitio inconsistencia de falta de entrada por excepcion: "
+                    + _exception_summary(row_exceptions),
+                )
+            else:
+                _inconsistency(
+                    inconsistencies,
+                    employee_id,
+                    employee_name,
+                    date_for_report,
+                    "Falta Registro de entrada",
+                    "No se encontro hora de entrada.",
+                )
         elif not has_exit:
-            _inconsistency(
-                inconsistencies,
-                employee_id,
-                employee_name,
-                date_for_report,
-                "Falta Registro de salida",
-                "No se encontro hora de salida.",
-            )
+            if row_exceptions:
+                _inconsistency(
+                    inconsistencies,
+                    employee_id,
+                    employee_name,
+                    date_for_report,
+                    "Excepcion aplicada",
+                    "Se omitio inconsistencia de falta de salida por excepcion: "
+                    + _exception_summary(row_exceptions),
+                )
+            else:
+                _inconsistency(
+                    inconsistencies,
+                    employee_id,
+                    employee_name,
+                    date_for_report,
+                    "Falta Registro de salida",
+                    "No se encontro hora de salida.",
+                )
 
         entry_time = _parse_time(entry_raw) if has_entry else None
         exit_time = _parse_time(exit_raw) if has_exit else None
@@ -208,14 +268,25 @@ def process_punches(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.Da
         end_dt = datetime.combine(date_parsed.date(), exit_time.time())
 
         if end_dt <= start_dt:
-            _inconsistency(
-                inconsistencies,
-                employee_id,
-                employee_name,
-                date_parsed.date(),
-                "Salida menor que entrada",
-                f"Entrada {entry_raw} / Salida {exit_raw}.",
-            )
+            if row_exceptions:
+                _inconsistency(
+                    inconsistencies,
+                    employee_id,
+                    employee_name,
+                    date_parsed.date(),
+                    "Excepcion aplicada",
+                    "Se omitio inconsistencia de salida menor/igual que entrada por excepcion: "
+                    + _exception_summary(row_exceptions),
+                )
+            else:
+                _inconsistency(
+                    inconsistencies,
+                    employee_id,
+                    employee_name,
+                    date_parsed.date(),
+                    "Salida menor que entrada",
+                    f"Entrada {entry_raw} / Salida {exit_raw}.",
+                )
             continue
 
         real_minutes = int(round((end_dt - start_dt).total_seconds() / 60))
@@ -233,6 +304,19 @@ def process_punches(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.Da
                 "real_minutes": real_minutes,
                 "rounded_minutes": rounded_minutes,
             }
+        )
+
+    for item in exceptions:
+        key = (item.employee_id, item.exception_date, item.exception_type.strip(), item.details.strip())
+        if key in used_exception_keys:
+            continue
+        _inconsistency(
+            inconsistencies,
+            item.employee_id or "",
+            "",
+            item.exception_date,
+            "Excepcion configurada sin uso",
+            f"{item.exception_type}. {item.details}".strip(),
         )
 
     segments_df = pd.DataFrame(valid_segments)
