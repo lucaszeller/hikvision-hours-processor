@@ -12,6 +12,11 @@ import customtkinter as ctk
 import tkinter as tk
 from tkinter import filedialog, messagebox
 
+from services.exceptions import (
+    ExceptionConfigError,
+    append_manual_exceptions_to_file,
+    ensure_exceptions_file,
+)
 from services.processor import ProcessorService
 from services.parser import load_hikvision_excel
 
@@ -19,6 +24,8 @@ try:
     from tkcalendar import Calendar
 except Exception:  # pragma: no cover - optional dependency at runtime
     Calendar = None
+
+DEFAULT_EXCEPTIONS_FILENAME = "feriados_nacionales_argentina_2026.xlsx"
 
 
 class HikvisionApp(ctk.CTk):
@@ -61,6 +68,7 @@ class HikvisionApp(ctk.CTk):
         self._employee_label_to_id: dict[str, str] = {"Todos": ""}
 
         self._build_ui()
+        self._initialize_default_exceptions_file()
 
     def _build_ui(self) -> None:
         self.grid_columnconfigure(0, weight=1)
@@ -341,6 +349,15 @@ class HikvisionApp(ctk.CTk):
         self.log_box.insert("end", "Listo para procesar fichadas.\n")
         self.log_box.configure(state="disabled")
 
+        watermark = ctk.CTkLabel(
+            page,
+            text="PORTA",
+            font=ctk.CTkFont(size=116, weight="bold"),
+            text_color=("#E7ECF4", "#202A38"),
+        )
+        watermark.place(relx=0.64, rely=0.52, anchor="center")
+        watermark.lower()
+
         return page
 
     def _build_exceptions_page(self, parent: ctk.CTkFrame) -> ctk.CTkFrame:
@@ -390,7 +407,7 @@ class HikvisionApp(ctk.CTk):
 
         self.clear_exceptions_button = ctk.CTkButton(
             sidebar,
-            text="Quitar archivo",
+            text="Usar archivo por defecto",
             height=34,
             fg_color="transparent",
             border_width=1,
@@ -535,6 +552,15 @@ class HikvisionApp(ctk.CTk):
             "# Ejemplo: 20|2026-05-01|Feriado|Dia del trabajador\n",
         )
 
+        watermark = ctk.CTkLabel(
+            page,
+            text="PORTA",
+            font=ctk.CTkFont(size=116, weight="bold"),
+            text_color=("#E7ECF4", "#202A38"),
+        )
+        watermark.place(relx=0.64, rely=0.52, anchor="center")
+        watermark.lower()
+
         return page
 
     def _show_page(self, page: str) -> None:
@@ -643,6 +669,48 @@ class HikvisionApp(ctk.CTk):
             self.exceptions_summary_label.configure(
                 text=f"Excepciones: {file_text}\nCarga manual: {manual_count} lineas"
             )
+
+    def _default_exceptions_path(self) -> Path:
+        return Path(__file__).resolve().parent.parent / DEFAULT_EXCEPTIONS_FILENAME
+
+    def _initialize_default_exceptions_file(self) -> None:
+        default_path = self._default_exceptions_path()
+        try:
+            ensure_exceptions_file(default_path)
+        except ExceptionConfigError as exc:
+            self.log(f"No se pudo inicializar archivo de excepciones por defecto: {exc}")
+            return
+
+        self.exceptions_file = default_path
+        self._set_exceptions_file_entry(str(self.exceptions_file))
+        self._refresh_exceptions_summary()
+        self.log(f"Archivo de excepciones por defecto: {self.exceptions_file}")
+
+    def _manual_text_from_box(self) -> str:
+        return self.exceptions_manual_box.get("1.0", "end").strip() if self.exceptions_manual_box else ""
+
+    def _reset_manual_box_to_template(self) -> None:
+        if self.exceptions_manual_box is None:
+            return
+        self.exceptions_manual_box.delete("1.0", "end")
+        self.exceptions_manual_box.insert(
+            "end",
+            "# Formato por linea: ID|YYYY-MM-DD|TIPO|DETALLE\n"
+            "# Ejemplo: 20|2026-05-01|Feriado|Dia del trabajador\n",
+        )
+        self._refresh_exceptions_summary()
+
+    def _persist_manual_exceptions(self) -> int:
+        if self.exceptions_file is None:
+            raise ExceptionConfigError("No hay archivo de excepciones seleccionado.")
+
+        manual_text = self._manual_text_from_box()
+        if self._count_manual_exceptions(manual_text) == 0:
+            return 0
+
+        added_count = append_manual_exceptions_to_file(self.exceptions_file, manual_text)
+        self._reset_manual_box_to_template()
+        return added_count
 
     def _set_employee_selector_values(self, labels: list[str]) -> None:
         if not labels:
@@ -815,16 +883,7 @@ class HikvisionApp(ctk.CTk):
         self.log(f"Se removio la ultima linea manual: {removed}")
 
     def clear_manual_exceptions_box(self) -> None:
-        if self.exceptions_manual_box is None:
-            return
-
-        self.exceptions_manual_box.delete("1.0", "end")
-        self.exceptions_manual_box.insert(
-            "end",
-            "# Formato por linea: ID|YYYY-MM-DD|TIPO|DETALLE\n"
-            "# Ejemplo: 20|2026-05-01|Feriado|Dia del trabajador\n",
-        )
-        self._refresh_exceptions_summary()
+        self._reset_manual_box_to_template()
         self.log("Carga manual de excepciones reiniciada.")
 
     def _push_progress(self, percent: int, message: str) -> None:
@@ -945,18 +1004,36 @@ class HikvisionApp(ctk.CTk):
         if not filepath:
             return
 
-        self.exceptions_file = Path(filepath)
+        selected = Path(filepath)
+        try:
+            self.exceptions_file = ensure_exceptions_file(selected)
+        except ExceptionConfigError as exc:
+            messagebox.showerror("Error", str(exc))
+            return
         self._set_exceptions_file_entry(str(self.exceptions_file))
         self._refresh_exceptions_summary()
 
     def clear_exceptions_file(self) -> None:
-        self.exceptions_file = None
-        self._set_exceptions_file_entry("")
-        self._refresh_exceptions_summary()
+        self._initialize_default_exceptions_file()
+        self.log("Se restablecio el archivo de excepciones por defecto.")
 
     def save_exceptions_config(self) -> None:
+        if self.exceptions_file is None:
+            messagebox.showwarning("Atencion", "No hay archivo de excepciones seleccionado.")
+            return
+        try:
+            added_count = self._persist_manual_exceptions()
+        except ExceptionConfigError as exc:
+            messagebox.showerror("Error", str(exc))
+            return
+
         self._refresh_exceptions_summary()
-        self.log("Configuracion de excepciones guardada.")
+        if added_count > 0:
+            self.log(
+                f"Configuracion guardada. Se agregaron {added_count} excepciones manuales en {self.exceptions_file.name}."
+            )
+        else:
+            self.log("Configuracion guardada. No habia nuevas excepciones manuales para agregar.")
 
     def process_file(self) -> None:
         if not self.selected_file:
@@ -965,7 +1042,19 @@ class HikvisionApp(ctk.CTk):
         if self._worker_thread and self._worker_thread.is_alive():
             return
 
-        manual_text = self.exceptions_manual_box.get("1.0", "end").strip() if self.exceptions_manual_box else ""
+        if self.exceptions_file is None:
+            self._initialize_default_exceptions_file()
+
+        try:
+            added_count = self._persist_manual_exceptions()
+        except ExceptionConfigError as exc:
+            messagebox.showerror("Error", str(exc))
+            return
+
+        if added_count > 0 and self.exceptions_file is not None:
+            self.log(
+                f"Se guardaron {added_count} excepciones manuales en {self.exceptions_file.name} antes de procesar."
+            )
 
         self.output_file = None
         self.open_button.configure(state="disabled")
@@ -977,7 +1066,7 @@ class HikvisionApp(ctk.CTk):
 
         self._worker_thread = threading.Thread(
             target=self._worker_run,
-            args=(self.selected_file, self.exceptions_file, manual_text),
+            args=(self.selected_file, self.exceptions_file, ""),
             daemon=True,
         )
         self._worker_thread.start()

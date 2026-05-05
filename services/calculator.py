@@ -39,6 +39,8 @@ INCONSISTENCIAS_COLUMNS = [
 ]
 
 
+SATURDAY_START_MINUTE = 7 * 60 + 30
+
 def _minutes_to_hhmm(total_minutes: int) -> str:
     hours, minutes = divmod(max(0, int(total_minutes)), 60)
     return f"{hours:02d}:{minutes:02d}"
@@ -491,13 +493,17 @@ def process_punches(
 
             worked_minutes = int(row_data.get("Minutos redondeados", 0))
             if worked_minutes > 0:
-                # Con fichadas válidas no debe clasificarse Ausente.
-                scheduled_start = scheduled_start_minute_by_employee.get(str(employee_id).strip())
+                # Con fichadas validas no debe clasificarse Ausente.
                 first_entry_minutes = day_first_entry_minutes.get(day_key)
-                if scheduled_start is not None and first_entry_minutes is not None:
-                    status = "Tarde" if first_entry_minutes > int(scheduled_start) else "Normal"
+                if work_date.weekday() == 5 and first_entry_minutes is not None:
+                    # Regla sabado: horario fijo 07:30 para todos.
+                    status = "Tarde" if first_entry_minutes > SATURDAY_START_MINUTE else "Normal"
                 else:
-                    status = "Tarde" if bool(state.get("late")) else "Normal"
+                    scheduled_start = scheduled_start_minute_by_employee.get(str(employee_id).strip())
+                    if scheduled_start is not None and first_entry_minutes is not None:
+                        status = "Tarde" if first_entry_minutes > int(scheduled_start) else "Normal"
+                    else:
+                        status = "Tarde" if bool(state.get("late")) else "Normal"
             else:
                 exception_types = state.get("exception_types") or []
                 if exception_types:

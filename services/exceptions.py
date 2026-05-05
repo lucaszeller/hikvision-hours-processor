@@ -9,6 +9,8 @@ import re
 
 import pandas as pd
 
+EXCEPTIONS_COLUMNS = ["ID de persona", "Fecha", "Tipo", "Detalle", "Manual"]
+
 
 class ExceptionConfigError(Exception):
     pass
@@ -104,20 +106,94 @@ def _build_exceptions_from_dataframe(df: pd.DataFrame) -> list[WorkException]:
     return results
 
 
+def _read_exceptions_dataframe(file_path: Path) -> pd.DataFrame:
+    suffix = file_path.suffix.lower()
+    if suffix == ".csv":
+        return pd.read_csv(file_path)
+    if suffix in {".xlsx", ".xls"}:
+        return pd.read_excel(file_path)
+    raise ExceptionConfigError(
+        "Formato de excepciones no soportado. Usa .csv, .xls o .xlsx."
+    )
+
+
+def _write_exceptions_dataframe(file_path: Path, df: pd.DataFrame) -> None:
+    suffix = file_path.suffix.lower()
+    if suffix == ".csv":
+        df.to_csv(file_path, index=False)
+        return
+    if suffix in {".xlsx", ".xls"}:
+        df.to_excel(file_path, index=False)
+        return
+    raise ExceptionConfigError(
+        "Formato de excepciones no soportado. Usa .csv, .xls o .xlsx."
+    )
+
+
+def _standardize_exceptions_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty and len(df.columns) == 0:
+        return pd.DataFrame(columns=EXCEPTIONS_COLUMNS)
+
+    columns = [str(col) for col in df.columns]
+    employee_col = _find_column(columns, ["id de persona", "employee id", "legajo", "id"])
+    date_col = _find_column(columns, ["fecha", "date", "work date"])
+    type_col = _find_column(columns, ["tipo", "type", "excepcion", "motivo"])
+    details_col = _find_column(columns, ["detalle", "details", "descripcion", "nota"])
+    manual_col = _find_column(columns, ["manual", "carga manual", "origen manual"])
+
+    if (date_col is None or type_col is None) and not df.empty:
+        raise ExceptionConfigError(
+            "El archivo de excepciones debe contener columnas de Fecha y Tipo."
+        )
+
+    rename_map: dict[str, str] = {}
+    if employee_col and employee_col != "ID de persona":
+        rename_map[employee_col] = "ID de persona"
+    if date_col and date_col != "Fecha":
+        rename_map[date_col] = "Fecha"
+    if type_col and type_col != "Tipo":
+        rename_map[type_col] = "Tipo"
+    if details_col and details_col != "Detalle":
+        rename_map[details_col] = "Detalle"
+    if manual_col and manual_col != "Manual":
+        rename_map[manual_col] = "Manual"
+
+    result = df.rename(columns=rename_map).copy()
+    for column in EXCEPTIONS_COLUMNS:
+        if column not in result.columns:
+            result[column] = ""
+
+    return result
+
+
+def _exception_key(employee_id: str | None, date_value: object, type_text: object, details: object) -> tuple[str, str, str, str]:
+    employee_norm = _clean_optional(employee_id)
+    date_norm = _parse_date(date_value).isoformat()
+    type_norm = _clean_optional(type_text)
+    details_norm = _clean_optional(details)
+    return (employee_norm, date_norm, type_norm, details_norm)
+
+
+def ensure_exceptions_file(path: str | Path) -> Path:
+    file_path = Path(path)
+    if not file_path.exists():
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        _write_exceptions_dataframe(file_path, pd.DataFrame(columns=EXCEPTIONS_COLUMNS))
+        return file_path
+
+    df = _read_exceptions_dataframe(file_path)
+    standardized = _standardize_exceptions_dataframe(df)
+    if list(df.columns) != list(standardized.columns):
+        _write_exceptions_dataframe(file_path, standardized)
+    return file_path
+
+
 def load_exceptions_file(path: str | Path) -> list[WorkException]:
     file_path = Path(path)
     if not file_path.exists():
         raise ExceptionConfigError(f"No existe el archivo de excepciones: {file_path}")
 
-    suffix = file_path.suffix.lower()
-    if suffix == ".csv":
-        df = pd.read_csv(file_path)
-    elif suffix in {".xlsx", ".xls"}:
-        df = pd.read_excel(file_path)
-    else:
-        raise ExceptionConfigError(
-            "Formato de excepciones no soportado. Usa .csv, .xls o .xlsx."
-        )
+    df = _read_exceptions_dataframe(file_path)
 
     return _build_exceptions_from_dataframe(df)
 
@@ -196,6 +272,64 @@ def merge_exceptions(
         deduped.append(item)
 
     return deduped
+
+
+def append_manual_exceptions_to_file(
+    path: str | Path,
+    manual_text: str | None,
+) -> int:
+    manual_exceptions = parse_manual_exceptions(manual_text)
+    if not manual_exceptions:
+        return 0
+
+    file_path = ensure_exceptions_file(path)
+    df = _standardize_exceptions_dataframe(_read_exceptions_dataframe(file_path))
+
+    existing_keys: set[tuple[str, str, str, str]] = set()
+    for _, row in df.iterrows():
+        row_date = _clean_optional(row.get("Fecha", ""))
+        row_type = _clean_optional(row.get("Tipo", ""))
+        if not row_date or not row_type:
+            continue
+        try:
+            existing_keys.add(
+                _exception_key(
+                    row.get("ID de persona", ""),
+                    row_date,
+                    row_type,
+                    row.get("Detalle", ""),
+                )
+            )
+        except ExceptionConfigError:
+            continue
+
+    new_rows: list[dict[str, str]] = []
+    for item in manual_exceptions:
+        key = _exception_key(
+            item.employee_id or "",
+            item.exception_date.isoformat(),
+            item.exception_type,
+            item.details,
+        )
+        if key in existing_keys:
+            continue
+        existing_keys.add(key)
+        new_rows.append(
+            {
+                "ID de persona": item.employee_id or "",
+                "Fecha": item.exception_date.isoformat(),
+                "Tipo": item.exception_type,
+                "Detalle": item.details,
+                "Manual": "Si",
+            }
+        )
+
+    if not new_rows:
+        return 0
+
+    df = pd.concat([df, pd.DataFrame(new_rows)], ignore_index=True)
+    _write_exceptions_dataframe(file_path, df)
+    return len(new_rows)
 
 
 def build_exception_index(exceptions: list[WorkException]) -> dict[tuple[str | None, date], list[WorkException]]:

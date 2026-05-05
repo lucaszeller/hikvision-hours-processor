@@ -75,6 +75,7 @@ def _apply_sheet_format(worksheet, sheet_name: str) -> None:
     config = SHEET_LAYOUTS[sheet_name]
     headers = [cell.value for cell in worksheet[1]]
     header_to_idx = {str(value): idx + 1 for idx, value in enumerate(headers) if value is not None}
+    status_col_idx = header_to_idx.get("Estado")
 
     worksheet.freeze_panes = "A2"
     worksheet.auto_filter.ref = worksheet.dimensions
@@ -91,9 +92,23 @@ def _apply_sheet_format(worksheet, sheet_name: str) -> None:
             worksheet.column_dimensions[get_column_letter(col_idx)].width = width
 
     for row_idx in range(2, worksheet.max_row + 1):
-        if row_idx % 2 == 0:
-            for col_idx in range(1, worksheet.max_column + 1):
-                worksheet.cell(row=row_idx, column=col_idx).fill = ALT_ROW_FILL
+        row_fill = None
+        row_status = ""
+        if sheet_name == "Diario" and status_col_idx is not None:
+            row_status = str(worksheet.cell(row=row_idx, column=status_col_idx).value or "").strip().lower()
+            if row_status == "tarde":
+                row_fill = LATE_FILL
+            elif row_status == "ausente":
+                row_fill = ABSENT_FILL
+            elif row_status not in {"", "normal"}:
+                row_fill = EXCEPTION_FILL
+
+        for col_idx in range(1, worksheet.max_column + 1):
+            cell = worksheet.cell(row=row_idx, column=col_idx)
+            if row_fill is not None:
+                cell.fill = row_fill
+            elif row_idx % 2 == 0:
+                cell.fill = ALT_ROW_FILL
 
         for header, col_idx in header_to_idx.items():
             cell = worksheet.cell(row=row_idx, column=col_idx)
@@ -107,14 +122,9 @@ def _apply_sheet_format(worksheet, sheet_name: str) -> None:
                 cell.number_format = "DD/MM/YYYY"
 
             if sheet_name == "Diario" and header == "Estado":
-                status = str(cell.value or "").strip().lower()
-                if status == "tarde":
-                    cell.fill = LATE_FILL
-                elif status == "ausente":
-                    cell.fill = ABSENT_FILL
+                if row_status == "ausente":
                     cell.font = ABSENT_FONT
-                elif status not in {"", "normal"}:
-                    cell.fill = EXCEPTION_FILL
+                elif row_status not in {"", "normal", "tarde"}:
                     cell.font = EXCEPTION_FONT
 
 

@@ -223,6 +223,35 @@ def test_weekend_rule_only_counts_weekend_days_with_punches_and_as_overtime() ->
     assert int(monthly.iloc[0]["Minutos extra"]) == 480
 
 
+def test_saturday_lateness_uses_fixed_0730_start_for_all() -> None:
+    df = pd.DataFrame(
+        {
+            "employee_id": ["20", "20", "30", "30"],
+            "employee_name": ["Ana", "Ana", "Luis", "Luis"],
+            "department": ["A", "A", "B", "B"],
+            "schedule": ["", "", "", ""],
+            # 2026-05-09 es sabado
+            "work_date_raw": ["2026-05-09", "2026-05-09", "2026-05-09", "2026-05-09"],
+            "entry_time_raw": ["07:30", "12:00", "07:31", "12:00"],
+            "exit_time_raw": ["11:30", "16:00", "11:30", "16:00"],
+            "late_raw": ["", "", "", ""],
+            "absent_raw": ["", "", "", ""],
+        }
+    )
+
+    daily, _, _ = process_punches(
+        df,
+        scheduled_minutes_by_employee={"20": 540, "30": 540},
+        # Aunque el horario de inicio del empleado sea distinto,
+        # en sabado debe usar siempre 07:30.
+        scheduled_start_minute_by_employee={"20": 450, "30": 600},
+    )
+
+    status_by_id = {str(row["ID de persona"]): row["Estado"] for _, row in daily.iterrows()}
+    assert status_by_id["20"] == "Normal"  # 07:30 exacto
+    assert status_by_id["30"] == "Tarde"   # 07:31
+
+
 def test_empty_input_returns_empty_dataframes_with_expected_columns() -> None:
     df = pd.DataFrame(
         columns=[

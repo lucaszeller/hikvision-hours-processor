@@ -15,11 +15,13 @@ Aplicacion interna en Python para procesar reportes de horas de Hikvision/iVMS-4
 
 ## Excepciones
 
+- Por defecto la app usa `feriados_nacionales_argentina_2026.xlsx` (en la carpeta del proyecto).
 - Se pueden cargar desde archivo `.csv/.xls/.xlsx` con columnas:
   - `ID de persona` (opcional, vacio = aplica a todos)
   - `Fecha` (obligatorio, formato recomendado `YYYY-MM-DD`)
   - `Tipo` (obligatorio; por ejemplo `Feriado`, `Vacaciones`, `Enfermedad`, `Permiso`)
   - `Detalle` (opcional)
+- La app agrega/normaliza la columna `Manual`. Cuando guardas o procesas, las lineas manuales se anexan al archivo de excepciones con `Manual = Si`.
 - Tambien se pueden cargar manualmente desde la UI con formato por linea:
   - `ID|YYYY-MM-DD|TIPO|DETALLE`
 
