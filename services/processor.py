@@ -19,14 +19,17 @@ def _hhmm_to_minutes(value: str) -> int:
     text = str(value).strip()
     if ":" not in text:
         raise ValidationError(f"Formato de horas invalido: '{value}'")
+
     hours_text, minutes_text = text.split(":", 1)
     try:
         hours = int(hours_text)
         minutes = int(minutes_text)
     except ValueError as exc:
         raise ValidationError(f"Formato de horas invalido: '{value}'") from exc
-    if minutes < 0 or minutes >= 60 or hours < 0:
+
+    if hours < 0 or minutes < 0 or minutes >= 60:
         raise ValidationError(f"Formato de horas invalido: '{value}'")
+
     return hours * 60 + minutes
 
 
@@ -34,21 +37,28 @@ def _validate_daily_consistency(daily_df: pd.DataFrame) -> None:
     if daily_df.empty:
         return
 
-    required = {"Legajo", "Nombre", "Fecha", "Horas totales", "Minutos totales"}
+    required = {
+        "ID de persona",
+        "Nombre",
+        "Fecha",
+        "Minutos reales",
+        "Minutos redondeados",
+        "Horas totales",
+    }
     missing = sorted(required - set(daily_df.columns))
     if missing:
         raise ValidationError(
-            "Faltan columnas en horas diarias para validacion: " + ", ".join(missing)
+            "Faltan columnas en hoja Diario para validacion: " + ", ".join(missing)
         )
 
     for idx, row in daily_df.iterrows():
-        reported_minutes = int(row["Minutos totales"])
-        parsed_minutes = _hhmm_to_minutes(row["Horas totales"])
-        if reported_minutes != parsed_minutes:
+        rounded_minutes = int(row["Minutos redondeados"])
+        hhmm_minutes = _hhmm_to_minutes(row["Horas totales"])
+        if rounded_minutes != hhmm_minutes:
             raise ValidationError(
-                "Inconsistencia diaria detectada en fila "
-                f"{idx + 2}: Horas totales='{row['Horas totales']}' "
-                f"no coincide con Minutos totales={reported_minutes}."
+                "Inconsistencia en Diario fila "
+                f"{idx + 2}: Horas totales='{row['Horas totales']}' no coincide "
+                f"con Minutos redondeados={rounded_minutes}."
             )
 
 
@@ -57,62 +67,77 @@ def _validate_monthly_consistency(daily_df: pd.DataFrame, monthly_df: pd.DataFra
         return
 
     if daily_df.empty and not monthly_df.empty:
-        raise ValidationError("Resumen mensual tiene datos pero horas diarias esta vacio.")
+        raise ValidationError("Mensual tiene datos pero Diario esta vacio.")
 
     if not daily_df.empty and monthly_df.empty:
-        raise ValidationError("Horas diarias tiene datos pero resumen mensual esta vacio.")
+        raise ValidationError("Diario tiene datos pero Mensual esta vacio.")
 
-    required_daily = {"Legajo", "Nombre", "Minutos totales"}
-    required_monthly = {"Legajo", "Nombre", "Minutos totales", "Horas mensuales"}
+    required_daily = {"ID de persona", "Nombre", "Minutos redondeados"}
+    required_monthly = {
+        "ID de persona",
+        "Nombre",
+        "Minutos totales",
+        "Horas totales",
+        "Dias trabajados",
+    }
     missing_daily = sorted(required_daily - set(daily_df.columns))
     missing_monthly = sorted(required_monthly - set(monthly_df.columns))
 
     if missing_daily:
         raise ValidationError(
-            "Faltan columnas en horas diarias para validacion mensual: "
-            + ", ".join(missing_daily)
+            "Faltan columnas en Diario para validacion mensual: " + ", ".join(missing_daily)
         )
     if missing_monthly:
         raise ValidationError(
-            "Faltan columnas en resumen mensual para validacion: "
-            + ", ".join(missing_monthly)
+            "Faltan columnas en Mensual para validacion: " + ", ".join(missing_monthly)
         )
 
     expected_monthly = (
-        daily_df.groupby(["Legajo", "Nombre"], as_index=False)["Minutos totales"]
-        .sum()
-        .rename(columns={"Minutos totales": "Minutos esperados"})
+        daily_df.groupby(["ID de persona", "Nombre"], as_index=False)
+        .agg({"Fecha": "nunique", "Minutos redondeados": "sum"})
+        .rename(
+            columns={
+                "Fecha": "Dias esperados",
+                "Minutos redondeados": "Minutos esperados",
+            }
+        )
     )
 
     merged = monthly_df.merge(
         expected_monthly,
-        on=["Legajo", "Nombre"],
+        on=["ID de persona", "Nombre"],
         how="outer",
         indicator=True,
     )
 
-    missing_rows = merged[merged["_merge"] != "both"]
-    if not missing_rows.empty:
-        raise ValidationError(
-            "Resumen mensual no coincide con horas diarias (empleados faltantes o extra)."
-        )
+    if not merged[merged["_merge"] != "both"].empty:
+        raise ValidationError("Mensual no coincide con Diario (empleados faltantes o extra).")
 
-    for idx, row in merged.iterrows():
-        monthly_minutes = int(row["Minutos totales"])
+    for _, row in merged.iterrows():
         expected_minutes = int(row["Minutos esperados"])
-        if monthly_minutes != expected_minutes:
+        monthly_minutes = int(row["Minutos totales"])
+        if expected_minutes != monthly_minutes:
             raise ValidationError(
-                "Inconsistencia mensual detectada para "
-                f"Legajo {row['Legajo']} - {row['Nombre']}: "
+                "Inconsistencia mensual para "
+                f"ID {row['ID de persona']} - {row['Nombre']}: "
                 f"mensual={monthly_minutes}, esperado={expected_minutes}."
             )
 
-        parsed_hhmm = _hhmm_to_minutes(row["Horas mensuales"])
-        if parsed_hhmm != monthly_minutes:
+        expected_days = int(row["Dias esperados"])
+        monthly_days = int(row["Dias trabajados"])
+        if expected_days != monthly_days:
             raise ValidationError(
-                "Formato mensual inconsistente para "
-                f"Legajo {row['Legajo']} - {row['Nombre']}: "
-                f"Horas mensuales='{row['Horas mensuales']}' no coincide con minutos={monthly_minutes}."
+                "Dias trabajados inconsistentes para "
+                f"ID {row['ID de persona']} - {row['Nombre']}: "
+                f"mensual={monthly_days}, esperado={expected_days}."
+            )
+
+        hhmm_minutes = _hhmm_to_minutes(row["Horas totales"])
+        if hhmm_minutes != monthly_minutes:
+            raise ValidationError(
+                "Formato de horas mensual inconsistente para "
+                f"ID {row['ID de persona']} - {row['Nombre']}: "
+                f"Horas totales='{row['Horas totales']}' y minutos={monthly_minutes}."
             )
 
 
@@ -125,27 +150,24 @@ def _validate_no_inconsistencies(inconsistencies_df: pd.DataFrame) -> None:
     if inconsistencies_df.empty:
         return
 
-    issue_counts = (
-        inconsistencies_df["Tipo de inconsistencia"]
-        .value_counts()
-        .sort_index()
-        .to_dict()
+    counts = (
+        inconsistencies_df["Tipo de inconsistencia"].value_counts().sort_index().to_dict()
     )
-    summary = ", ".join(f"{issue}: {count}" for issue, count in issue_counts.items())
+    summary = ", ".join(f"{issue}: {count}" for issue, count in counts.items())
 
     examples = []
     for _, row in inconsistencies_df.head(5).iterrows():
         examples.append(
-            f"{row['Legajo']} | {row['Nombre']} | {row['Fecha']} | "
+            f"{row['ID de persona']} | {row['Nombre']} | {row['Fecha']} | "
             f"{row['Tipo de inconsistencia']} | {row['Detalle']}"
         )
 
-    details = "\n".join(examples)
     raise ValidationError(
         "Se detectaron inconsistencias de fichadas. "
-        "Modo estricto activo: no se genera reporte con datos dudosos.\n"
+        "Modo estricto activo: no se genera reporte.\n"
         f"Resumen: {summary}\n"
-        f"Primeros casos:\n{details}"
+        "Primeros casos:\n"
+        + "\n".join(examples)
     )
 
 
@@ -158,37 +180,37 @@ class ProcessorService:
         strict_mode: bool = False,
     ) -> Path:
         source = Path(input_path)
-        if output_dir is None:
-            output_dir = source.parent
+        target_dir = Path(output_dir) if output_dir is not None else source.parent
 
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_path = Path(output_dir) / f"reporte_horas_{stamp}.xlsx"
+        output_path = target_dir / f"reporte_horas_{stamp}.xlsx"
 
         if progress_callback:
-            progress_callback(10, "Leyendo fichadas del archivo...")
-        punches_df = load_hikvision_excel(source)
+            progress_callback(10, "Leyendo reporte Hikvision...")
+        source_df = load_hikvision_excel(source)
 
         if progress_callback:
-            progress_callback(55, "Calculando horas e inconsistencias...")
-        daily_df, monthly_df, inconsistencies_df = process_punches(punches_df)
+            progress_callback(55, "Calculando horas y detectando inconsistencias...")
+        daily_df, monthly_df, inconsistencies_df = process_punches(source_df)
 
         if progress_callback:
             progress_callback(72, "Validando consistencia de resultados...")
         _validate_results(daily_df, monthly_df)
+
         if strict_mode:
             _validate_no_inconsistencies(inconsistencies_df)
         elif progress_callback and not inconsistencies_df.empty:
-            issue_counts = (
+            counts = (
                 inconsistencies_df["Tipo de inconsistencia"]
                 .value_counts()
                 .sort_index()
                 .to_dict()
             )
-            summary = ", ".join(f"{issue}: {count}" for issue, count in issue_counts.items())
-            progress_callback(78, f"Se detectaron inconsistencias (se incluyen en reporte): {summary}")
+            summary = ", ".join(f"{issue}: {count}" for issue, count in counts.items())
+            progress_callback(78, f"Inconsistencias detectadas (incluidas en reporte): {summary}")
 
         if progress_callback:
-            progress_callback(85, "Generando reporte final...")
+            progress_callback(85, "Generando Excel final...")
         report_path = export_report(output_path, daily_df, monthly_df, inconsistencies_df)
 
         if progress_callback:

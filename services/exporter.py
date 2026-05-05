@@ -22,46 +22,47 @@ THIN_BORDER = Border(
 )
 
 SHEET_LAYOUTS = {
-    "Horas diarias": {
+    "Diario": {
         "widths": {
-            "Legajo": 12,
+            "ID de persona": 14,
             "Nombre": 28,
             "Fecha": 12,
-            "Cantidad de fichadas": 20,
-            "Marcaciones (I/S)": 44,
-            "Tramos trabajados": 56,
+            "Departamento": 22,
+            "Tramos trabajados": 64,
+            "Minutos reales": 16,
+            "Minutos redondeados": 20,
             "Horas totales": 14,
-            "Minutos totales": 16,
         },
-        "left_cols": {"Nombre", "Marcaciones (I/S)", "Tramos trabajados"},
-        "wrap_cols": {"Marcaciones (I/S)", "Tramos trabajados"},
+        "left_cols": {"Nombre", "Departamento", "Tramos trabajados"},
+        "wrap_cols": {"Tramos trabajados"},
         "date_cols": {"Fecha"},
-        "priority_sort": ["Fecha", "Nombre", "Legajo"],
+        "priority_sort": ["ID de persona", "Fecha", "Nombre"],
     },
-    "Resumen mensual": {
+    "Mensual": {
         "widths": {
-            "Legajo": 12,
+            "ID de persona": 14,
             "Nombre": 28,
+            "Dias trabajados": 16,
             "Minutos totales": 16,
-            "Horas mensuales": 14,
+            "Horas totales": 14,
         },
         "left_cols": {"Nombre"},
         "wrap_cols": set(),
         "date_cols": set(),
-        "priority_sort": ["Nombre", "Legajo"],
+        "priority_sort": ["ID de persona", "Nombre"],
     },
     "Inconsistencias": {
         "widths": {
-            "Legajo": 12,
+            "ID de persona": 14,
             "Nombre": 28,
             "Fecha": 12,
-            "Tipo de inconsistencia": 24,
-            "Detalle": 64,
+            "Tipo de inconsistencia": 28,
+            "Detalle": 68,
         },
         "left_cols": {"Nombre", "Tipo de inconsistencia", "Detalle"},
         "wrap_cols": {"Detalle"},
         "date_cols": {"Fecha"},
-        "priority_sort": ["Fecha", "Nombre", "Legajo"],
+        "priority_sort": ["ID de persona", "Fecha", "Nombre"],
     },
 }
 
@@ -108,6 +109,7 @@ def _apply_sheet_format(worksheet, sheet_name: str) -> None:
             if header in config["date_cols"] and cell.value not in ("", None):
                 cell.number_format = "DD/MM/YYYY"
 
+
 def export_report(
     output_path: str | Path,
     daily_df: pd.DataFrame,
@@ -118,22 +120,21 @@ def export_report(
     output.parent.mkdir(parents=True, exist_ok=True)
     temp_output = output.with_suffix(f"{output.suffix}.tmp")
 
-    daily_export = _sort_for_report(daily_df.copy(), SHEET_LAYOUTS["Horas diarias"]["priority_sort"])
-    monthly_export = _sort_for_report(monthly_df.copy(), SHEET_LAYOUTS["Resumen mensual"]["priority_sort"])
-    inconsistencies_export = _sort_for_report(
+    diario_export = _sort_for_report(daily_df.copy(), SHEET_LAYOUTS["Diario"]["priority_sort"])
+    mensual_export = _sort_for_report(monthly_df.copy(), SHEET_LAYOUTS["Mensual"]["priority_sort"])
+    inconsistencias_export = _sort_for_report(
         inconsistencies_df.copy(), SHEET_LAYOUTS["Inconsistencias"]["priority_sort"]
     )
 
     try:
         with pd.ExcelWriter(temp_output, engine="openpyxl") as writer:
-            daily_export.to_excel(writer, sheet_name="Horas diarias", index=False)
-            monthly_export.to_excel(writer, sheet_name="Resumen mensual", index=False)
-            inconsistencies_export.to_excel(writer, sheet_name="Inconsistencias", index=False)
+            diario_export.to_excel(writer, sheet_name="Diario", index=False)
+            mensual_export.to_excel(writer, sheet_name="Mensual", index=False)
+            inconsistencias_export.to_excel(writer, sheet_name="Inconsistencias", index=False)
 
             workbook = writer.book
-            for sheet_name in ("Horas diarias", "Resumen mensual", "Inconsistencias"):
-                worksheet = workbook[sheet_name]
-                _apply_sheet_format(worksheet, sheet_name)
+            for sheet_name in ("Diario", "Mensual", "Inconsistencias"):
+                _apply_sheet_format(workbook[sheet_name], sheet_name)
 
         temp_output.replace(output)
     except Exception as exc:

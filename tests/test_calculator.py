@@ -1,82 +1,105 @@
-from datetime import datetime
+from __future__ import annotations
 
 import pandas as pd
 
 from services.calculator import process_punches
 
 
-def test_calculate_daily_and_monthly_hours() -> None:
-    df = pd.DataFrame(
+def _base_input() -> pd.DataFrame:
+    return pd.DataFrame(
         {
-            "employee_id": ["100", "100", "100", "100"],
-            "employee_name": ["Ana", "Ana", "Ana", "Ana"],
-            "punch_datetime": [
-                datetime(2026, 3, 3, 8, 0),
-                datetime(2026, 3, 3, 12, 0),
-                datetime(2026, 3, 3, 13, 0),
-                datetime(2026, 3, 3, 17, 0),
-            ],
-            "work_date": [datetime(2026, 3, 3).date()] * 4,
+            "employee_id": ["20", "20"],
+            "employee_name": ["De Carli Gonzalo", "De Carli Gonzalo"],
+            "department": ["Produccion", "Produccion"],
+            "schedule": ["Manana(07:30:00-12:00:00)", "Tarde(13:00:00-17:30:00)"],
+            "work_date_raw": ["2026-04-01", "2026-04-01"],
+            "entry_time_raw": ["07:30:56", "13:00:05"],
+            "exit_time_raw": ["12:02:12", "17:32:45"],
         }
     )
+
+
+def test_calculate_daily_and_monthly_hours_with_rounding() -> None:
+    df = _base_input()
 
     daily, monthly, inconsistencies = process_punches(df)
 
     assert len(daily) == 1
-    assert daily.iloc[0]["Horas totales"] == "08:00"
-    assert int(daily.iloc[0]["Minutos totales"]) == 480
-    assert "Ingreso 08:00" in daily.iloc[0]["Marcaciones (I/S)"]
-    assert "Salida 12:00" in daily.iloc[0]["Marcaciones (I/S)"]
+    assert int(daily.iloc[0]["Minutos reales"]) == 544
+    assert int(daily.iloc[0]["Minutos redondeados"]) == 540
+    assert daily.iloc[0]["Horas totales"] == "09:00"
+    assert "07:30 - 12:02" in daily.iloc[0]["Tramos trabajados"]
 
     assert len(monthly) == 1
-    assert monthly.iloc[0]["Horas mensuales"] == "08:00"
+    assert int(monthly.iloc[0]["Dias trabajados"]) == 1
+    assert int(monthly.iloc[0]["Minutos totales"]) == 540
+    assert monthly.iloc[0]["Horas totales"] == "09:00"
 
     assert inconsistencies.empty
 
 
-def test_detects_odd_punch_count() -> None:
+def test_detects_required_inconsistencies_without_stopping_processing() -> None:
     df = pd.DataFrame(
         {
-            "employee_id": ["100", "100", "100"],
-            "employee_name": ["Ana", "Ana", "Ana"],
-            "punch_datetime": [
-                datetime(2026, 3, 3, 8, 0),
-                datetime(2026, 3, 3, 12, 0),
-                datetime(2026, 3, 3, 13, 0),
-            ],
-            "work_date": [datetime(2026, 3, 3).date()] * 3,
+            "employee_id": ["20", "", "30", "40"],
+            "employee_name": ["Ana", "Bruno", "", "Carla"],
+            "department": ["A", "B", "C", "D"],
+            "schedule": ["", "", "", ""],
+            "work_date_raw": ["2026-04-01", "fecha-mala", "2026-04-01", "2026-04-01"],
+            "entry_time_raw": ["08:00", "08:00", "", "14:00"],
+            "exit_time_raw": ["12:00", "17:00", "", "13:00"],
         }
     )
 
-    _, _, inconsistencies = process_punches(df)
+    daily, monthly, inconsistencies = process_punches(df)
 
+    # First row is valid, others should produce inconsistencies.
+    assert len(daily) == 1
+    assert len(monthly) == 1
     assert not inconsistencies.empty
-    assert "Cantidad impar" in set(inconsistencies["Tipo de inconsistencia"])
+
+    issue_types = set(inconsistencies["Tipo de inconsistencia"])
+    assert "ID de persona vacio" in issue_types
+    assert "Nombre vacio" in issue_types
+    assert "Fecha invalida" in issue_types
+    assert "Ambos vacios" in issue_types
+    assert "Salida menor que entrada" in issue_types
 
 
 def test_empty_input_returns_empty_dataframes_with_expected_columns() -> None:
-    df = pd.DataFrame(columns=["employee_id", "employee_name", "punch_datetime", "work_date"])
+    df = pd.DataFrame(
+        columns=[
+            "employee_id",
+            "employee_name",
+            "department",
+            "schedule",
+            "work_date_raw",
+            "entry_time_raw",
+            "exit_time_raw",
+        ]
+    )
 
     daily, monthly, inconsistencies = process_punches(df)
 
     assert list(daily.columns) == [
-        "Legajo",
+        "ID de persona",
         "Nombre",
         "Fecha",
-        "Cantidad de fichadas",
-        "Marcaciones (I/S)",
+        "Departamento",
         "Tramos trabajados",
+        "Minutos reales",
+        "Minutos redondeados",
         "Horas totales",
-        "Minutos totales",
     ]
     assert list(monthly.columns) == [
-        "Legajo",
+        "ID de persona",
         "Nombre",
+        "Dias trabajados",
         "Minutos totales",
-        "Horas mensuales",
+        "Horas totales",
     ]
     assert list(inconsistencies.columns) == [
-        "Legajo",
+        "ID de persona",
         "Nombre",
         "Fecha",
         "Tipo de inconsistencia",

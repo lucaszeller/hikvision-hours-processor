@@ -7,25 +7,45 @@ from pathlib import Path
 
 import pandas as pd
 
-from domain.column_aliases import COLUMN_CANDIDATES
-
-REQUIRED_COLUMNS = ("employee_id", "employee_name")
-DATETIME_COLUMNS = ("punch_datetime",)
-DATE_TIME_PART_COLUMNS = ("punch_date", "punch_time")
-
 
 class ParsingError(Exception):
     pass
 
 
-def _normalize(value: str) -> str:
+# Canonical keys used internally.
+COLUMN_ALIASES: dict[str, list[str]] = {
+    "employee_id": ["id de persona", "person id", "employee id", "legajo", "codigo"],
+    "employee_name": ["nombre", "name", "employee name", "person name"],
+    "department": ["departamento", "department", "dept"],
+    "position": ["posicion", "position", "puesto"],
+    "work_date": ["fecha", "date", "work date"],
+    "schedule": ["horario", "schedule", "shift"],
+    "entry_time": ["registro de entrada", "entrada", "check in", "in time"],
+    "exit_time": ["registro de salida", "salida", "check out", "out time"],
+    "worked": ["trabajo", "worked"],
+    "overtime": ["horas extra", "overtime"],
+    "attended": ["asistio", "attended"],
+    "late": ["entrada con retraso", "late", "llegada tarde"],
+    "left_early": ["temprano", "left early"],
+    "absent": ["ausente", "absent"],
+    "work_permission": ["permiso laboral", "work permission"],
+}
+
+REQUIRED_COLUMNS = ("employee_id", "employee_name", "work_date", "entry_time", "exit_time")
+
+
+def _normalize(value: object) -> str:
     text = unicodedata.normalize("NFKD", str(value)).encode("ascii", "ignore").decode("ascii")
     return " ".join(text.lower().replace("_", " ").split())
 
 
-def _looks_like_hikvision_html_xls(path: Path) -> bool:
-    header = path.read_bytes()[:512].lstrip().lower()
-    return header.startswith(b"<html")
+def _clean_cell(value: object) -> str:
+    if pd.isna(value):
+        return ""
+    text = str(value).strip()
+    if text.lower() in {"nan", "none", "nat", "-"}:
+        return ""
+    return text
 
 
 def _column_match_score(column: str, aliases: list[str]) -> int:
@@ -42,7 +62,36 @@ def _column_match_score(column: str, aliases: list[str]) -> int:
     return best
 
 
-<<<<<<< HEAD
+def _best_column(columns: list[str], aliases: list[str]) -> str | None:
+    ranked = sorted(columns, key=lambda c: _column_match_score(c, aliases), reverse=True)
+    if ranked and _column_match_score(ranked[0], aliases) > 0:
+        return ranked[0]
+    return None
+
+
+def detect_column_mapping(columns: list[str]) -> dict[str, str]:
+    mapping: dict[str, str] = {}
+    for canonical_name, aliases in COLUMN_ALIASES.items():
+        match = _best_column(columns, aliases)
+        if match:
+            mapping[canonical_name] = match
+
+    missing = [col for col in REQUIRED_COLUMNS if col not in mapping]
+    if missing:
+        raise ParsingError(
+            "No se pudieron detectar columnas obligatorias: "
+            + ", ".join(missing)
+            + ". Revisa encabezados del reporte Hikvision."
+        )
+
+    return mapping
+
+
+def _looks_like_hikvision_html_xls(path: Path) -> bool:
+    header = path.read_bytes()[:512].lstrip().lower()
+    return header.startswith(b"<html")
+
+
 def _extract_hikvision_table(html_text: str, table_class: str) -> str:
     pattern = re.compile(
         rf"<table[^>]*class=['\"]{re.escape(table_class)}['\"][^>]*>(.*?)</table>",
@@ -81,25 +130,6 @@ def _parse_table_rows(table_html: str) -> list[list[str]]:
     return rows
 
 
-def _marker_is_positive(value: object) -> bool:
-    text = str(value).strip()
-    if text in {"", "-", "0", "0.0", "0:0", "0:00", "nan", "NaN", "None"}:
-        return False
-
-    if ":" in text:
-        parts = [p.strip() for p in text.split(":")]
-        try:
-            numbers = [int(part) for part in parts if part != ""]
-            return any(number > 0 for number in numbers)
-        except ValueError:
-            return True
-
-    try:
-        return float(text.replace(",", ".")) > 0
-    except ValueError:
-        return True
-
-
 def _read_hikvision_html_report(path: Path) -> pd.DataFrame:
     raw_bytes = path.read_bytes()
     try:
@@ -120,7 +150,6 @@ def _read_hikvision_html_report(path: Path) -> pd.DataFrame:
 
     data_rows = _parse_table_rows(report_html)
     normalized_rows: list[list[str]] = []
-
     for row in data_rows:
         if not any(cell.strip() for cell in row):
             continue
@@ -134,164 +163,28 @@ def _read_hikvision_html_report(path: Path) -> pd.DataFrame:
     return pd.DataFrame(normalized_rows, columns=headers)
 
 
-def _build_canonical_from_entry_exit(df: pd.DataFrame) -> pd.DataFrame:
-    columns = [str(c) for c in df.columns]
-    entry_exit_aliases = {
-        "employee_id": ["id de persona", "employee id", "person id", "legajo", "codigo"],
-        "employee_name": ["nombre", "employee name", "name", "person name"],
-        "work_date": ["fecha", "date", "work date"],
-        "entry_time": ["registro de entrada", "entrada", "check in", "in time"],
-        "exit_time": ["registro de salida", "salida", "check out", "out time"],
-        "late_marker": ["entrada con retraso", "late", "llegada tarde", "retardo"],
-        "absent_marker": ["ausente", "absent", "falta", "faltas"],
-    }
-
-    mapping: dict[str, str] = {}
-    for canonical_name, aliases in entry_exit_aliases.items():
-        ranked = sorted(columns, key=lambda c: _column_match_score(c, aliases), reverse=True)
-        if ranked and _column_match_score(ranked[0], aliases) > 0:
-            mapping[canonical_name] = ranked[0]
-
-    required = ("employee_id", "employee_name", "work_date", "entry_time", "exit_time")
-    missing = [key for key in required if key not in mapping]
-    if missing:
-        raise ParsingError(
-            "No se pudieron detectar columnas de entrada/salida: " + ", ".join(missing)
-        )
-
-    base = pd.DataFrame()
-    base["employee_id"] = df[mapping["employee_id"]].astype(str).str.strip()
-    base["employee_name"] = df[mapping["employee_name"]].astype(str).str.strip()
-    base["work_date_raw"] = pd.to_datetime(df[mapping["work_date"]], errors="coerce")
-    base["late_flag"] = (
-        df[mapping["late_marker"]].map(_marker_is_positive) if "late_marker" in mapping else False
-    )
-    base["absent_flag"] = (
-        df[mapping["absent_marker"]].map(_marker_is_positive)
-        if "absent_marker" in mapping
-        else False
-    )
-    base["work_date"] = base["work_date_raw"].dt.date
-
-    valid_base = base.dropna(subset=["work_date_raw"]).copy()
-    if valid_base.empty:
-        raise ParsingError("No hay fechas validas en el reporte.")
-
-    date_text = valid_base["work_date_raw"].dt.strftime("%Y-%m-%d")
-    entry_text = (
-        df.loc[valid_base.index, mapping["entry_time"]]
-        .astype(str)
-        .str.strip()
-        .replace({"-": "", "nan": "", "NaN": "", "None": ""})
-    )
-    exit_text = (
-        df.loc[valid_base.index, mapping["exit_time"]]
-        .astype(str)
-        .str.strip()
-        .replace({"-": "", "nan": "", "NaN": "", "None": ""})
-    )
-
-    entry_dt = pd.to_datetime(date_text + " " + entry_text, errors="coerce")
-    exit_dt = pd.to_datetime(date_text + " " + exit_text, errors="coerce")
-
-    punch_rows: list[pd.DataFrame] = []
-
-    entry_rows = valid_base.copy()
-    entry_rows["punch_datetime"] = entry_dt
-    entry_rows = entry_rows.dropna(subset=["punch_datetime"])
-    if not entry_rows.empty:
-        punch_rows.append(entry_rows)
-
-    exit_rows = valid_base.copy()
-    exit_rows["punch_datetime"] = exit_dt
-    exit_rows = exit_rows.dropna(subset=["punch_datetime"])
-    if not exit_rows.empty:
-        punch_rows.append(exit_rows)
-
-    no_punch_status_rows = valid_base[
-        entry_dt.isna()
-        & exit_dt.isna()
-        & (valid_base["late_flag"].astype(bool) | valid_base["absent_flag"].astype(bool))
-    ].copy()
-    if not no_punch_status_rows.empty:
-        no_punch_status_rows["punch_datetime"] = pd.NaT
-        punch_rows.append(no_punch_status_rows)
-
-    if not punch_rows:
-        raise ParsingError("No se pudieron construir fichadas validas desde entrada/salida.")
-
-    canonical_df = pd.concat(punch_rows, ignore_index=True)
-    canonical_df = canonical_df[
-        (canonical_df["employee_id"] != "") & (canonical_df["employee_name"] != "")
-    ]
-    canonical_df = canonical_df[
-        [
-            "employee_id",
-            "employee_name",
-            "work_date",
-            "punch_datetime",
-            "late_flag",
-            "absent_flag",
-        ]
-    ]
-    canonical_df = canonical_df.sort_values(
-        by=["employee_id", "employee_name", "work_date", "punch_datetime"],
-        na_position="last",
-    ).reset_index(drop=True)
-    return canonical_df
-=======
-def _best_column(columns: list[str], aliases: list[str]) -> str | None:
-    ranked = sorted(columns, key=lambda c: _column_match_score(c, aliases), reverse=True)
-    if ranked and _column_match_score(ranked[0], aliases) > 0:
-        return ranked[0]
-    return None
->>>>>>> ef586063230aaba8617f425fce740814f056fd53
-
-
-def detect_column_mapping(columns: list[str]) -> dict[str, str]:
-    mapping: dict[str, str] = {}
-    for canonical_name, aliases in COLUMN_CANDIDATES.items():
-        matched = _best_column(columns, aliases)
-        if matched:
-            mapping[canonical_name] = matched
-
-    missing_required = [col for col in REQUIRED_COLUMNS if col not in mapping]
-    has_datetime = all(col in mapping for col in DATETIME_COLUMNS)
-    has_split_datetime = all(col in mapping for col in DATE_TIME_PART_COLUMNS)
-
-    if missing_required or (not has_datetime and not has_split_datetime):
-        details = []
-        if missing_required:
-            details.append("columnas obligatorias: " + ", ".join(missing_required))
-        if not has_datetime and not has_split_datetime:
-            details.append("fecha/hora (columna unificada o separadas)")
-
-        raise ParsingError(
-<<<<<<< HEAD
-            "No se pudieron detectar columnas obligatorias: "
-            + ", ".join(missing)
-            + ". Revisa encabezados del Excel de Hikvision."
-=======
-            "No se pudieron detectar columnas necesarias (" + "; ".join(details) + "). "
-            "Revisá encabezados del Excel de Hikvision."
->>>>>>> ef586063230aaba8617f425fce740814f056fd53
-        )
-
-    return mapping
-
-
-def _read_hikvision_sheet(path: Path) -> pd.DataFrame:
+def _read_hikvision_xlsx(path: Path) -> pd.DataFrame:
+    # Hikvision files can shift header row by a few lines.
     for header in (0, 1, 2, 3):
         df = pd.read_excel(path, header=header)
+        if df.empty:
+            continue
         columns = [str(c) for c in df.columns]
         try:
             detect_column_mapping(columns)
             return df
         except ParsingError:
             continue
+
     raise ParsingError(
-        "No se pudo detectar una fila de encabezados compatible en el Excel (probadas filas 1 a 4)."
+        "No se pudo detectar una fila de encabezados compatible en el Excel (filas 1 a 4)."
     )
+
+
+def _read_source_dataframe(path: Path) -> pd.DataFrame:
+    if _looks_like_hikvision_html_xls(path):
+        return _read_hikvision_html_report(path)
+    return _read_hikvision_xlsx(path)
 
 
 def load_hikvision_excel(file_path: str | Path) -> pd.DataFrame:
@@ -299,68 +192,35 @@ def load_hikvision_excel(file_path: str | Path) -> pd.DataFrame:
     if not path.exists():
         raise ParsingError(f"No existe el archivo: {path}")
 
-<<<<<<< HEAD
-    if _looks_like_hikvision_html_xls(path):
-        source_df = _read_hikvision_html_report(path)
-        canonical_df = _build_canonical_from_entry_exit(source_df)
-    else:
-        source_df = pd.read_excel(path)
-        if source_df.empty:
-            raise ParsingError("El archivo no contiene filas.")
-=======
-    df = _read_hikvision_sheet(path)
-    if df.empty:
+    source_df = _read_source_dataframe(path)
+    if source_df.empty:
         raise ParsingError("El archivo no contiene filas.")
->>>>>>> ef586063230aaba8617f425fce740814f056fd53
 
-        mapping = detect_column_mapping([str(c) for c in source_df.columns])
+    source_columns = [str(c) for c in source_df.columns]
+    mapping = detect_column_mapping(source_columns)
 
-<<<<<<< HEAD
-        canonical_df = pd.DataFrame()
-        canonical_df["employee_id"] = source_df[mapping["employee_id"]].astype(str).str.strip()
-        canonical_df["employee_name"] = source_df[mapping["employee_name"]].astype(str).str.strip()
-        canonical_df["punch_datetime"] = pd.to_datetime(
-            source_df[mapping["punch_datetime"]], errors="coerce"
-        )
-        canonical_df["event_type"] = (
-            source_df[mapping["event_type"]].astype(str).str.strip()
-            if "event_type" in mapping
-            else None
-        )
-        canonical_df["late_flag"] = False
-        canonical_df["absent_flag"] = False
-=======
     canonical_df = pd.DataFrame()
-    canonical_df["employee_id"] = df[mapping["employee_id"]].astype(str).str.strip()
-    canonical_df["employee_name"] = df[mapping["employee_name"]].astype(str).str.strip()
-
-    if "punch_datetime" in mapping:
-        canonical_df["punch_datetime"] = pd.to_datetime(df[mapping["punch_datetime"]], errors="coerce")
-    else:
-        date_part = pd.to_datetime(df[mapping["punch_date"]], errors="coerce").dt.date
-        time_part = pd.to_datetime(df[mapping["punch_time"]], errors="coerce").dt.time
-        canonical_df["punch_datetime"] = pd.to_datetime(
-            date_part.astype(str) + " " + time_part.astype(str), errors="coerce"
-        )
-
-    canonical_df["event_type"] = (
-        df[mapping["event_type"]].astype(str).str.strip() if "event_type" in mapping else None
+    canonical_df["employee_id"] = source_df[mapping["employee_id"]].map(_clean_cell)
+    canonical_df["employee_name"] = source_df[mapping["employee_name"]].map(_clean_cell)
+    canonical_df["department"] = (
+        source_df[mapping["department"]].map(_clean_cell) if "department" in mapping else ""
     )
->>>>>>> ef586063230aaba8617f425fce740814f056fd53
+    canonical_df["schedule"] = (
+        source_df[mapping["schedule"]].map(_clean_cell) if "schedule" in mapping else ""
+    )
+    canonical_df["work_date_raw"] = source_df[mapping["work_date"]].map(_clean_cell)
+    canonical_df["entry_time_raw"] = source_df[mapping["entry_time"]].map(_clean_cell)
+    canonical_df["exit_time_raw"] = source_df[mapping["exit_time"]].map(_clean_cell)
 
-        canonical_df = canonical_df.dropna(subset=["punch_datetime"])
-        canonical_df = canonical_df[
-            (canonical_df["employee_id"] != "") & (canonical_df["employee_name"] != "")
-        ]
+    # Keep source row index for traceability in inconsistencies.
+    canonical_df["source_row"] = source_df.index.to_series().astype(int) + 2
+
+    # Remove lines that are completely empty in critical fields.
+    critical = ["employee_id", "employee_name", "work_date_raw", "entry_time_raw", "exit_time_raw"]
+    mask_non_empty = canonical_df[critical].apply(lambda col: col.astype(str).str.strip() != "").any(axis=1)
+    canonical_df = canonical_df[mask_non_empty].reset_index(drop=True)
 
     if canonical_df.empty:
-        raise ParsingError("No quedaron fichadas validas luego de limpiar datos incompletos.")
+        raise ParsingError("No se detectaron filas utiles en el archivo de entrada.")
 
-    if "work_date" not in canonical_df.columns:
-        canonical_df["work_date"] = canonical_df["punch_datetime"].dt.date
-    else:
-        canonical_df["work_date"] = canonical_df["work_date"].fillna(
-            canonical_df["punch_datetime"].dt.date
-        )
-    canonical_df["work_time"] = canonical_df["punch_datetime"].dt.time
     return canonical_df
