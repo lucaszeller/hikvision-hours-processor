@@ -23,7 +23,6 @@ def test_calculate_daily_and_monthly_hours() -> None:
     daily, monthly, inconsistencies = process_punches(df)
 
     assert len(daily) == 1
-codex/create-desktop-app-for-attendance-processing-18do52
     assert daily.iloc[0]["Horas totales"] == "08:00"
     assert int(daily.iloc[0]["Minutos totales"]) == 480
     assert "Ingreso 08:00" in daily.iloc[0]["Marcaciones (I/S)"]
@@ -32,12 +31,6 @@ codex/create-desktop-app-for-attendance-processing-18do52
     assert len(monthly) == 1
     assert monthly.iloc[0]["Horas mensuales"] == "08:00"
 
-    assert daily.iloc[0]["total_hours"] == "08:00"
-    assert int(daily.iloc[0]["total_minutes"]) == 480
-
-    assert len(monthly) == 1
-    assert monthly.iloc[0]["monthly_total_hours"] == "08:00"
- main
     assert inconsistencies.empty
 
 
@@ -58,7 +51,6 @@ def test_detects_odd_punch_count() -> None:
     _, _, inconsistencies = process_punches(df)
 
     assert not inconsistencies.empty
-codex/create-desktop-app-for-attendance-processing-18do52
     assert "Cantidad impar" in set(inconsistencies["Tipo de inconsistencia"])
 
 
@@ -77,9 +69,17 @@ def test_empty_input_returns_empty_dataframes_with_expected_columns() -> None:
         "Horas totales",
         "Minutos totales",
     ]
-    assert list(monthly.columns) == ["Legajo", "Nombre", "Minutos totales", "Horas mensuales"]
-    assert list(inconsistencies.columns) == ["Legajo", "Nombre", "Fecha", "Tipo de inconsistencia", "Detalle"]
+    assert list(monthly.columns) == [
+        "Legajo",
+        "Nombre",
+        "Minutos totales",
+        "Horas mensuales",
+    ]
+    assert list(inconsistencies.columns) == [
+        "Legajo",
+        "Nombre",
+        "Fecha",
+        "Tipo de inconsistencia",
+        "Detalle",
+    ]
     assert daily.empty and monthly.empty and inconsistencies.empty
-
-    assert "Cantidad impar" in set(inconsistencies["issue_type"])
-main

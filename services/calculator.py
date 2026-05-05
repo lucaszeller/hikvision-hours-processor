@@ -72,7 +72,11 @@ def process_punches(
 
     grouped = (
         df.sort_values("punch_datetime")
+<<<<<<< HEAD
         .groupby(["employee_id", "employee_name", "work_date"], sort=True)
+=======
+         .groupby(["employee_id", "employee_name", "work_date"], sort=True)
+>>>>>>> ef586063230aaba8617f425fce740814f056fd53
     )
 
     for (employee_id, employee_name, work_date), group in grouped:

@@ -12,6 +12,8 @@ COLUMN_CANDIDATES = {
         "person id",
         "staff id",
         "codigo",
+        "no.",
+        "card no",
     ],
     "employee_name": [
         "nombre",
@@ -21,6 +23,7 @@ COLUMN_CANDIDATES = {
         "person name",
         "staff name",
         "empleado",
+        "user name",
     ],
     "punch_datetime": [
         "fecha y hora",
@@ -33,7 +36,10 @@ COLUMN_CANDIDATES = {
         "record time",
         "fichada",
         "fecha hora",
+        "attendance time",
     ],
+    "punch_date": ["date", "fecha", "work date", "record date"],
+    "punch_time": ["time", "hora", "check time", "record time", "attendance time"],
     "event_type": [
         "event type",
         "tipo",
@@ -41,5 +47,6 @@ COLUMN_CANDIDATES = {
         "status",
         "state",
         "verify mode",
+        "device name",
     ],
 }
