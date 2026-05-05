@@ -15,6 +15,7 @@ from services.exceptions import (
 )
 from services.exporter import export_report
 from services.parser import load_hikvision_excel
+from services.schedule_info import ScheduleInfoError, load_schedule_profiles
 
 
 class ValidationError(Exception):
@@ -47,8 +48,11 @@ def _validate_daily_consistency(daily_df: pd.DataFrame) -> None:
         "ID de persona",
         "Nombre",
         "Fecha",
+        "Estado",
         "Minutos reales",
         "Minutos redondeados",
+        "Minutos extra",
+        "Horas extra",
         "Horas totales",
     }
     missing = sorted(required - set(daily_df.columns))
@@ -65,6 +69,14 @@ def _validate_daily_consistency(daily_df: pd.DataFrame) -> None:
                 "Inconsistencia en Diario fila "
                 f"{idx + 2}: Horas totales='{row['Horas totales']}' no coincide "
                 f"con Minutos redondeados={rounded_minutes}."
+            )
+        extra_minutes = int(row["Minutos extra"])
+        extra_hhmm = _hhmm_to_minutes(row["Horas extra"])
+        if extra_minutes != extra_hhmm:
+            raise ValidationError(
+                "Inconsistencia en Diario fila "
+                f"{idx + 2}: Horas extra='{row['Horas extra']}' no coincide "
+                f"con Minutos extra={extra_minutes}."
             )
 
 
@@ -85,6 +97,8 @@ def _validate_monthly_consistency(daily_df: pd.DataFrame, monthly_df: pd.DataFra
         "Minutos totales",
         "Horas totales",
         "Dias trabajados",
+        "Minutos extra",
+        "Horas extra",
     }
     missing_daily = sorted(required_daily - set(daily_df.columns))
     missing_monthly = sorted(required_monthly - set(monthly_df.columns))
@@ -144,6 +158,14 @@ def _validate_monthly_consistency(daily_df: pd.DataFrame, monthly_df: pd.DataFra
                 "Formato de horas mensual inconsistente para "
                 f"ID {row['ID de persona']} - {row['Nombre']}: "
                 f"Horas totales='{row['Horas totales']}' y minutos={monthly_minutes}."
+            )
+        extra_minutes = int(row["Minutos extra"])
+        extra_hhmm = _hhmm_to_minutes(row["Horas extra"])
+        if extra_minutes != extra_hhmm:
+            raise ValidationError(
+                "Formato de horas extra mensual inconsistente para "
+                f"ID {row['ID de persona']} - {row['Nombre']}: "
+                f"Horas extra='{row['Horas extra']}' y minutos extra={extra_minutes}."
             )
 
 
@@ -215,11 +237,32 @@ class ProcessorService:
 
         merged_exceptions = merge_exceptions(file_exceptions, manual_exceptions)
 
+        info_path_candidates = [Path("info.xlsx"), source.parent / "info.xlsx"]
+        schedule_minutes: dict[str, int] = {}
+        start_minutes: dict[str, int] = {}
+        for candidate in info_path_candidates:
+            if candidate.exists():
+                try:
+                    if progress_callback:
+                        progress_callback(45, f"Cargando horarios desde {candidate.name}...")
+                    profiles = load_schedule_profiles(candidate)
+                    schedule_minutes = {
+                        employee_id: values["scheduled_minutes"] for employee_id, values in profiles.items()
+                    }
+                    start_minutes = {
+                        employee_id: values["start_minute"] for employee_id, values in profiles.items()
+                    }
+                except ScheduleInfoError as exc:
+                    raise ValidationError(str(exc)) from exc
+                break
+
         if progress_callback:
             progress_callback(55, "Calculando horas y detectando inconsistencias...")
         daily_df, monthly_df, inconsistencies_df = process_punches(
             source_df,
             exceptions=merged_exceptions,
+            scheduled_minutes_by_employee=schedule_minutes,
+            scheduled_start_minute_by_employee=start_minutes,
         )
 
         if progress_callback:

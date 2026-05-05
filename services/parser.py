@@ -211,6 +211,10 @@ def load_hikvision_excel(file_path: str | Path) -> pd.DataFrame:
     canonical_df["work_date_raw"] = source_df[mapping["work_date"]].map(_clean_cell)
     canonical_df["entry_time_raw"] = source_df[mapping["entry_time"]].map(_clean_cell)
     canonical_df["exit_time_raw"] = source_df[mapping["exit_time"]].map(_clean_cell)
+    canonical_df["late_raw"] = source_df[mapping["late"]].map(_clean_cell) if "late" in mapping else ""
+    canonical_df["absent_raw"] = (
+        source_df[mapping["absent"]].map(_clean_cell) if "absent" in mapping else ""
+    )
 
     # Keep source row index for traceability in inconsistencies.
     canonical_df["source_row"] = source_df.index.to_series().astype(int) + 2

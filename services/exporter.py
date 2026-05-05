@@ -14,6 +14,11 @@ class ExportError(Exception):
 HEADER_FILL = PatternFill("solid", fgColor="1F4E78")
 HEADER_FONT = Font(color="FFFFFF", bold=True)
 ALT_ROW_FILL = PatternFill("solid", fgColor="F5F8FC")
+LATE_FILL = PatternFill("solid", fgColor="FFF59D")
+ABSENT_FILL = PatternFill("solid", fgColor="EF9A9A")
+ABSENT_FONT = Font(color="7F1D1D", bold=True)
+EXCEPTION_FILL = PatternFill("solid", fgColor="A9DF8F")
+EXCEPTION_FONT = Font(color="14532D", bold=True)
 THIN_BORDER = Border(
     left=Side(style="thin", color="D9D9D9"),
     right=Side(style="thin", color="D9D9D9"),
@@ -28,9 +33,12 @@ SHEET_LAYOUTS = {
             "Nombre": 28,
             "Fecha": 12,
             "Departamento": 22,
+            "Estado": 12,
             "Tramos trabajados": 64,
             "Minutos reales": 16,
             "Minutos redondeados": 20,
+            "Minutos extra": 16,
+            "Horas extra": 14,
             "Horas totales": 14,
         },
         "left_cols": {"Nombre", "Departamento", "Tramos trabajados"},
@@ -44,25 +52,14 @@ SHEET_LAYOUTS = {
             "Nombre": 28,
             "Dias trabajados": 16,
             "Minutos totales": 16,
+            "Minutos extra": 16,
+            "Horas extra": 14,
             "Horas totales": 14,
         },
         "left_cols": {"Nombre"},
         "wrap_cols": set(),
         "date_cols": set(),
         "priority_sort": ["ID de persona", "Nombre"],
-    },
-    "Inconsistencias": {
-        "widths": {
-            "ID de persona": 14,
-            "Nombre": 28,
-            "Fecha": 12,
-            "Tipo de inconsistencia": 28,
-            "Detalle": 68,
-        },
-        "left_cols": {"Nombre", "Tipo de inconsistencia", "Detalle"},
-        "wrap_cols": {"Detalle"},
-        "date_cols": {"Fecha"},
-        "priority_sort": ["ID de persona", "Fecha", "Nombre"],
     },
 }
 
@@ -109,6 +106,17 @@ def _apply_sheet_format(worksheet, sheet_name: str) -> None:
             if header in config["date_cols"] and cell.value not in ("", None):
                 cell.number_format = "DD/MM/YYYY"
 
+            if sheet_name == "Diario" and header == "Estado":
+                status = str(cell.value or "").strip().lower()
+                if status == "tarde":
+                    cell.fill = LATE_FILL
+                elif status == "ausente":
+                    cell.fill = ABSENT_FILL
+                    cell.font = ABSENT_FONT
+                elif status not in {"", "normal"}:
+                    cell.fill = EXCEPTION_FILL
+                    cell.font = EXCEPTION_FONT
+
 
 def export_report(
     output_path: str | Path,
@@ -122,18 +130,13 @@ def export_report(
 
     diario_export = _sort_for_report(daily_df.copy(), SHEET_LAYOUTS["Diario"]["priority_sort"])
     mensual_export = _sort_for_report(monthly_df.copy(), SHEET_LAYOUTS["Mensual"]["priority_sort"])
-    inconsistencias_export = _sort_for_report(
-        inconsistencies_df.copy(), SHEET_LAYOUTS["Inconsistencias"]["priority_sort"]
-    )
-
     try:
         with pd.ExcelWriter(temp_output, engine="openpyxl") as writer:
             diario_export.to_excel(writer, sheet_name="Diario", index=False)
             mensual_export.to_excel(writer, sheet_name="Mensual", index=False)
-            inconsistencias_export.to_excel(writer, sheet_name="Inconsistencias", index=False)
 
             workbook = writer.book
-            for sheet_name in ("Diario", "Mensual", "Inconsistencias"):
+            for sheet_name in ("Diario", "Mensual"):
                 _apply_sheet_format(workbook[sheet_name], sheet_name)
 
         temp_output.replace(output)

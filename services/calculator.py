@@ -11,9 +11,12 @@ DIARIO_COLUMNS = [
     "Nombre",
     "Fecha",
     "Departamento",
+    "Estado",
     "Tramos trabajados",
     "Minutos reales",
     "Minutos redondeados",
+    "Minutos extra",
+    "Horas extra",
     "Horas totales",
 ]
 
@@ -22,6 +25,8 @@ MENSUAL_COLUMNS = [
     "Nombre",
     "Dias trabajados",
     "Minutos totales",
+    "Minutos extra",
+    "Horas extra",
     "Horas totales",
 ]
 
@@ -51,6 +56,24 @@ def _round_to_30(minutes: int) -> int:
 def _is_blank(value: object) -> bool:
     text = str(value).strip()
     return text == "" or text.lower() in {"nan", "none", "nat", "-"}
+
+
+def _marker_is_positive(value: object) -> bool:
+    text = str(value).strip()
+    if text in {"", "-", "0", "0.0", "0:0", "0:00", "nan", "NaN", "None"}:
+        return False
+    if ":" in text:
+        parts = [p.strip() for p in text.split(":") if p.strip() != ""]
+        if not parts:
+            return False
+        try:
+            return any(int(p) > 0 for p in parts)
+        except ValueError:
+            return True
+    try:
+        return float(text.replace(",", ".")) > 0
+    except ValueError:
+        return True
 
 
 def _parse_date(value: object) -> datetime | None:
@@ -112,11 +135,17 @@ def _exception_summary(items: list[WorkException]) -> str:
 def process_punches(
     df: pd.DataFrame,
     exceptions: list[WorkException] | None = None,
+    scheduled_minutes_by_employee: dict[str, int] | None = None,
+    scheduled_start_minute_by_employee: dict[str, int] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     valid_segments: list[dict] = []
     inconsistencies: list[dict] = []
+    day_flags: dict[tuple[str, str, date], dict[str, object]] = {}
 
     exceptions = exceptions or []
+    scheduled_minutes_by_employee = scheduled_minutes_by_employee or {}
+    scheduled_start_minute_by_employee = scheduled_start_minute_by_employee or {}
+    has_schedule_reference = bool(scheduled_minutes_by_employee)
     exceptions_index = build_exception_index(exceptions)
     used_exception_keys: set[tuple[str | None, date, str, str]] = set()
 
@@ -171,6 +200,33 @@ def process_punches(
 
         has_entry = not _is_blank(entry_raw)
         has_exit = not _is_blank(exit_raw)
+        weekday = date_parsed.weekday() if date_parsed is not None else None
+        is_saturday = weekday == 5
+        is_sunday = weekday == 6
+        is_weekend = is_saturday or is_sunday
+
+        # Regla: lunes a viernes normales; fines de semana sólo si hay fichada.
+        if is_weekend and not (has_entry or has_exit):
+            continue
+
+        late_marker = _marker_is_positive(row.get("late_raw", ""))
+        absent_marker = _marker_is_positive(row.get("absent_raw", ""))
+
+        if employee_id != "" and employee_name != "" and date_parsed is not None:
+            day_key = (employee_id, employee_name, date_parsed.date())
+            day_state = day_flags.setdefault(
+                day_key,
+                {"late": False, "absent": False, "departments": set(), "exception_types": []},
+            )
+            if department:
+                day_state["departments"].add(department)
+            day_state["late"] = bool(day_state["late"]) or late_marker
+            missing_both_without_exception = not has_entry and not has_exit and not row_exceptions
+            day_state["absent"] = bool(day_state["absent"]) or absent_marker or missing_both_without_exception
+            for exc in row_exceptions:
+                exc_type = str(exc.exception_type).strip()
+                if exc_type and exc_type not in day_state["exception_types"]:
+                    day_state["exception_types"].append(exc_type)
 
         if not has_entry and not has_exit:
             if row_exceptions:
@@ -189,7 +245,7 @@ def process_punches(
                     employee_id,
                     employee_name,
                     date_for_report,
-                    "Ambos vacios",
+                    "Ausente",
                     "Faltan Registro de entrada y Registro de salida.",
                 )
         elif not has_entry:
@@ -321,16 +377,32 @@ def process_punches(
 
     segments_df = pd.DataFrame(valid_segments)
 
-    if segments_df.empty:
+    if segments_df.empty and not day_flags:
         diario_df = pd.DataFrame(columns=DIARIO_COLUMNS)
         mensual_df = pd.DataFrame(columns=MENSUAL_COLUMNS)
     else:
+        if segments_df.empty:
+            segments_df = pd.DataFrame(
+                columns=[
+                    "employee_id",
+                    "employee_name",
+                    "department",
+                    "work_date",
+                    "entry_dt",
+                    "exit_dt",
+                    "schedule",
+                    "real_minutes",
+                    "rounded_minutes",
+                ]
+            )
+
         segments_df = segments_df.sort_values(
             ["employee_id", "work_date", "entry_dt", "schedule"],
             kind="stable",
         ).reset_index(drop=True)
 
-        grouped_rows: list[dict] = []
+        day_rows: dict[tuple[str, str, date], dict] = {}
+        day_first_entry_minutes: dict[tuple[str, str, date], int] = {}
         for (employee_id, employee_name, work_date), group in segments_df.groupby(
             ["employee_id", "employee_name", "work_date"],
             sort=True,
@@ -349,19 +421,96 @@ def process_punches(
 
             real_total = int(group["real_minutes"].sum())
             rounded_total = int(group["rounded_minutes"].sum())
+            first_entry = group["entry_dt"].min()
+            first_entry_minutes = first_entry.hour * 60 + first_entry.minute
+            day_first_entry_minutes[(str(employee_id), str(employee_name), work_date)] = first_entry_minutes
+            if work_date.weekday() in {5, 6}:
+                overtime_minutes = rounded_total
+            else:
+                scheduled_minutes = scheduled_minutes_by_employee.get(str(employee_id).strip())
+                if scheduled_minutes is None:
+                    overtime_minutes = 0
+                    if has_schedule_reference:
+                        _inconsistency(
+                            inconsistencies,
+                            str(employee_id),
+                            str(employee_name),
+                            work_date,
+                            "Horario no definido",
+                            "No hay horario configurado en info.xlsx para calcular horas extra.",
+                        )
+                else:
+                    overtime_minutes = max(0, rounded_total - int(scheduled_minutes))
 
-            grouped_rows.append(
-                {
+            day_rows[(str(employee_id), str(employee_name), work_date)] = {
+                "ID de persona": employee_id,
+                "Nombre": employee_name,
+                "Fecha": work_date,
+                "Departamento": department_value,
+                "Tramos trabajados": " | ".join(segments_text),
+                "Minutos reales": real_total,
+                "Minutos redondeados": rounded_total,
+                "Minutos extra": overtime_minutes,
+                "Horas extra": _minutes_to_hhmm(overtime_minutes),
+                "Horas totales": _minutes_to_hhmm(rounded_total),
+            }
+
+        grouped_rows: list[dict] = []
+        all_day_keys = sorted(
+            set(day_rows.keys()) | set(day_flags.keys()),
+            key=lambda k: (k[0], k[2], k[1]),
+        )
+        for day_key in all_day_keys:
+            employee_id, employee_name, work_date = day_key
+            state = day_flags.get(
+                day_key,
+                {"late": False, "absent": False, "departments": set(), "exception_types": []},
+            )
+            row_data = day_rows.get(day_key)
+
+            if row_data is None:
+                if (
+                    not bool(state.get("absent"))
+                    and not bool(state.get("late"))
+                    and not state.get("exception_types")
+                ):
+                    continue
+                departments = sorted([d for d in state["departments"] if str(d).strip() != ""])
+                row_data = {
                     "ID de persona": employee_id,
                     "Nombre": employee_name,
                     "Fecha": work_date,
-                    "Departamento": department_value,
-                    "Tramos trabajados": " | ".join(segments_text),
-                    "Minutos reales": real_total,
-                    "Minutos redondeados": rounded_total,
-                    "Horas totales": _minutes_to_hhmm(rounded_total),
+                    "Departamento": " / ".join(departments),
+                    "Tramos trabajados": "",
+                    "Minutos reales": 0,
+                    "Minutos redondeados": 0,
+                    "Minutos extra": 0,
+                    "Horas extra": "00:00",
+                    "Horas totales": "00:00",
                 }
-            )
+
+            worked_minutes = int(row_data.get("Minutos redondeados", 0))
+            if worked_minutes > 0:
+                # Con fichadas válidas no debe clasificarse Ausente.
+                scheduled_start = scheduled_start_minute_by_employee.get(str(employee_id).strip())
+                first_entry_minutes = day_first_entry_minutes.get(day_key)
+                if scheduled_start is not None and first_entry_minutes is not None:
+                    status = "Tarde" if first_entry_minutes > int(scheduled_start) else "Normal"
+                else:
+                    status = "Tarde" if bool(state.get("late")) else "Normal"
+            else:
+                exception_types = state.get("exception_types") or []
+                if exception_types:
+                    status = str(exception_types[0]).strip().title()
+                elif bool(state.get("absent")):
+                    status = "Ausente"
+                elif bool(state.get("late")):
+                    status = "Tarde"
+                else:
+                    status = "Normal"
+
+            row_data["Estado"] = status
+            grouped_rows.append(row_data)
 
         diario_df = pd.DataFrame(grouped_rows, columns=DIARIO_COLUMNS)
         diario_df = diario_df.sort_values(
@@ -374,6 +523,7 @@ def process_punches(
                 {
                     "Fecha": "nunique",
                     "Minutos redondeados": "sum",
+                    "Minutos extra": "sum",
                 }
             )
             .rename(
@@ -383,6 +533,7 @@ def process_punches(
                 }
             )
         )
+        mensual_df["Horas extra"] = mensual_df["Minutos extra"].map(_minutes_to_hhmm)
         mensual_df["Horas totales"] = mensual_df["Minutos totales"].map(_minutes_to_hhmm)
         mensual_df = mensual_df[MENSUAL_COLUMNS].sort_values(
             ["ID de persona", "Nombre"], kind="stable"
