@@ -218,6 +218,7 @@ def test_weekend_rule_only_counts_weekend_days_with_punches_and_as_overtime() ->
     assert int(sunday["Minutos redondeados"]) == 240
     assert int(sunday["Minutos extra"]) == 240
     assert sunday["Horas extra"] == "04:00"
+    assert sunday["Estado"] == "Domingo"
 
     assert len(monthly) == 1
     assert int(monthly.iloc[0]["Minutos extra"]) == 480

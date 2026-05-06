@@ -493,6 +493,11 @@ def process_punches(
 
             worked_minutes = int(row_data.get("Minutos redondeados", 0))
             if worked_minutes > 0:
+                if work_date.weekday() == 6:
+                    status = "Domingo"
+                    row_data["Estado"] = status
+                    grouped_rows.append(row_data)
+                    continue
                 # Con fichadas validas no debe clasificarse Ausente.
                 first_entry_minutes = day_first_entry_minutes.get(day_key)
                 if work_date.weekday() == 5 and first_entry_minutes is not None:
