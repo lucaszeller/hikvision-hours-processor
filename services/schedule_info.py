@@ -68,6 +68,48 @@ def _round_to_30(minutes: int) -> int:
     return quotient * 30
 
 
+def _parse_working_weekdays(value: object) -> set[int] | None:
+    text = _normalize(value)
+    if text in {"", "nan", "none", "nat", "-"}:
+        return None
+
+    day_map = {
+        "lunes": 0,
+        "martes": 1,
+        "miercoles": 2,
+        "jueves": 3,
+        "viernes": 4,
+        "sabado": 5,
+        "domingo": 6,
+    }
+
+    # Rango habitual: "lunes a viernes"
+    range_match = [
+        ("lunes a viernes", {0, 1, 2, 3, 4}),
+        ("lunes-viernes", {0, 1, 2, 3, 4}),
+        ("lunes a sabado", {0, 1, 2, 3, 4, 5}),
+        ("lunes-sabado", {0, 1, 2, 3, 4, 5}),
+    ]
+    for marker, days in range_match:
+        if marker in text:
+            return set(days)
+
+    normalized = (
+        text.replace(",", " ")
+        .replace(";", " ")
+        .replace("/", " ")
+        .replace("-", " ")
+        .replace(" y ", " ")
+        .replace(" e ", " ")
+    )
+    tokens = [token.strip() for token in normalized.split() if token.strip()]
+    found: set[int] = set()
+    for token in tokens:
+        if token in day_map:
+            found.add(day_map[token])
+    return found if found else None
+
+
 def _best_column(columns: list[str], aliases: list[str]) -> str | None:
     normalized = {_normalize(col): col for col in columns}
     for alias in aliases:
@@ -82,7 +124,7 @@ def _best_column(columns: list[str], aliases: list[str]) -> str | None:
     return None
 
 
-def load_schedule_profiles(info_path: str | Path) -> dict[str, dict[str, int]]:
+def load_schedule_profiles(info_path: str | Path) -> dict[str, dict[str, Any]]:
     path = Path(info_path)
     if not path.exists():
         return {}
@@ -108,11 +150,12 @@ def load_schedule_profiles(info_path: str | Path) -> dict[str, dict[str, int]]:
     col_t_in = _best_column(columns, ["horario ingreso tarde", "ingreso tarde"])
     col_t_out = _best_column(columns, ["horario salida tarde", "salida tarde"])
     col_corrido = _best_column(columns, ["horario corrido", "corrido"])
+    col_days = _best_column(columns, ["dias", "dias laborales", "dias de trabajo"])
 
     if col_id is None:
         raise ScheduleInfoError("No se encontro columna de ID en el archivo de horarios.")
 
-    result: dict[str, dict[str, int]] = {}
+    result: dict[str, dict[str, Any]] = {}
     for _, row in df.iterrows():
         employee_id = _clean_id(row[col_id])
         if not employee_id:
@@ -134,10 +177,14 @@ def load_schedule_profiles(info_path: str | Path) -> dict[str, dict[str, int]]:
             )
 
         start_minute = _to_minute_of_day(morning_in or afternoon_in)
+        working_weekdays = _parse_working_weekdays(row[col_days]) if col_days else None
+        if working_weekdays is None:
+            working_weekdays = {0, 1, 2, 3, 4}
         if scheduled > 0:
             result[employee_id] = {
                 "scheduled_minutes": _round_to_30(scheduled),
                 "start_minute": start_minute if start_minute is not None else 0,
+                "working_weekdays": working_weekdays,
             }
 
     return result

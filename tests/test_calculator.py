@@ -217,6 +217,80 @@ def test_approved_template_exception_pays_day_pending_rejected_do_not() -> None:
     assert int(monthly.iloc[0]["Minutos totales"]) == 810
 
 
+def test_global_exception_paid_day_applies_to_all_known_employees() -> None:
+    df = pd.DataFrame(
+        {
+            "employee_id": ["20", "30"],
+            "employee_name": ["Ana", "Luis"],
+            "department": ["A", "B"],
+            "schedule": ["", ""],
+            "work_date_raw": ["2026-07-08", "2026-07-08"],
+            "entry_time_raw": ["07:30", "08:00"],
+            "exit_time_raw": ["12:00", "12:00"],
+        }
+    )
+
+    exceptions = [
+        WorkException(
+            employee_id=None,  # legajo 1 en template
+            exception_date=pd.Timestamp("2026-07-09").date(),
+            exception_type="Feriado",
+            details="Global",
+            paid_day=True,
+        )
+    ]
+
+    daily, _, _ = process_punches(
+        df,
+        exceptions=exceptions,
+        scheduled_minutes_by_employee={"20": 540, "30": 480},
+        scheduled_start_minute_by_employee={"20": 450, "30": 480},
+    )
+
+    rows_feriado = daily[daily["Fecha"].astype(str) == "2026-07-09"]
+    assert len(rows_feriado) == 2
+
+    by_id = {str(row["ID de persona"]): row for _, row in rows_feriado.iterrows()}
+    assert by_id["20"]["Estado"] == "Feriado"
+    assert int(by_id["20"]["Minutos redondeados"]) == 540
+    assert by_id["20"]["Horas totales"] == "09:00"
+    assert by_id["30"]["Estado"] == "Feriado"
+    assert int(by_id["30"]["Minutos redondeados"]) == 480
+    assert by_id["30"]["Horas totales"] == "08:00"
+
+
+def test_non_working_employee_days_do_not_mark_absent_and_count_punch_as_overtime() -> None:
+    df = pd.DataFrame(
+        {
+            "employee_id": ["118", "118", "118"],
+            "employee_name": ["Zeller Lucas Ezequiel"] * 3,
+            "department": ["A"] * 3,
+            "schedule": [""] * 3,
+            # lunes (trabaja), martes (no trabaja), jueves (no trabaja con fichada)
+            "work_date_raw": ["2026-06-01", "2026-06-02", "2026-06-04"],
+            "entry_time_raw": ["07:30", "", "07:30"],
+            "exit_time_raw": ["12:00", "", "12:00"],
+            "late_raw": ["", "", ""],
+            "absent_raw": ["", "", ""],
+        }
+    )
+
+    daily, _, _ = process_punches(
+        df,
+        scheduled_minutes_by_employee={"118": 270},
+        scheduled_start_minute_by_employee={"118": 450},
+        working_weekdays_by_employee={"118": {0, 2, 4}},  # lun/mie/vie
+    )
+
+    by_date = {str(row["Fecha"]): row for _, row in daily.iterrows()}
+    assert "2026-06-02" not in by_date  # martes sin fichada: no ausente
+    assert by_date["2026-06-01"]["Estado"] == "Normal"
+    # jueves con fichada en dia no laborable: se toma como extra completa
+    assert by_date["2026-06-04"]["Estado"] == "Normal"
+    assert int(by_date["2026-06-04"]["Minutos redondeados"]) == 270
+    assert int(by_date["2026-06-04"]["Minutos extra"]) == 270
+
+
 def test_marks_late_and_absent_status_for_daily_cells() -> None:
     df = pd.DataFrame(
         {

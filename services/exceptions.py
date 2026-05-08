@@ -187,6 +187,13 @@ def _build_exceptions_from_absences_dataframe(df: pd.DataFrame) -> list[WorkExce
 
         paid_day = state_key == "aprobado"
 
+        employee_target: str | None
+        # Regla operativa: legajo "1" en template significa "todos los empleados".
+        if raw_employee == "1":
+            employee_target = None
+        else:
+            employee_target = raw_employee
+
         start_date = _parse_date(raw_from)
         end_date = _parse_date(raw_to) if raw_to else start_date
         if end_date < start_date:
@@ -200,7 +207,7 @@ def _build_exceptions_from_absences_dataframe(df: pd.DataFrame) -> list[WorkExce
         while current <= end_date:
             results.append(
                 WorkException(
-                    employee_id=raw_employee or None,
+                    employee_id=employee_target,
                     exception_date=current,
                     exception_type=exception_type,
                     details=details,

@@ -12,6 +12,7 @@ Aplicacion interna en Python para procesar reportes de horas de Hikvision/iVMS-4
 6. Consolidar hojas Diario y Mensual.
 7. Registrar inconsistencias sin detener el proceso.
 8. Exportar Excel final con hojas Diario, Mensual e Inconsistencias.
+9. Generar hoja `Liquidar` para estudio contable (matriz dia x empleado con colores por estado).
 
 ## Excepciones
 
@@ -45,6 +46,16 @@ Aplicacion interna en Python para procesar reportes de horas de Hikvision/iVMS-4
 
 - Para horarios y listado de empleados se prioriza `date.xlsx` (hoja `Empleados`) si existe.
 - Si `date.xlsx` no existe, se usa `info.xlsx`.
+- Se respetan los dias laborales por empleado (columna `Dias`).
+  - Ejemplo: si un empleado trabaja `lunes miercoles y viernes`, martes/jueves sin fichada no se marcan como `Ausente`.
+
+## Hoja Liquidar
+
+- Se agrega automaticamente en cada reporte final.
+- Estructura: `Fecha`, `Dia`, `Dia #` + una columna por empleado.
+- Cada celda empleado/dia muestra solo horas normales (`(Minutos redondeados - Minutos extra) / 60`).
+- Las horas extra no se incluyen en esta hoja.
+- Se pintan celdas por estado (vacaciones, feriado, enfermedad, tardanza, etc.) respetando la paleta configurada.
 
 ## Ejecutar
 

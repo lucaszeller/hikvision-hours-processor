@@ -23,6 +23,42 @@ class ValidationError(Exception):
     pass
 
 
+def _filter_to_report_month(source_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Period | None]:
+    if source_df.empty or "work_date_raw" not in source_df.columns:
+        return source_df, None
+
+    parsed = pd.to_datetime(source_df["work_date_raw"], errors="coerce")
+    if parsed.dropna().empty:
+        return source_df, None
+
+    periods = parsed.dt.to_period("M")
+    counts = periods.value_counts()
+    if counts.empty:
+        return source_df, None
+
+    max_count = int(counts.max())
+    candidates = [period for period, count in counts.items() if int(count) == max_count]
+    selected_period = max(candidates)
+
+    mask = periods == selected_period
+    filtered = source_df.loc[mask.fillna(False)].copy()
+    if filtered.empty:
+        return source_df, None
+
+    return filtered.reset_index(drop=True), selected_period
+
+
+def _filter_exceptions_to_report_month(exceptions: list, period: pd.Period | None) -> list:
+    if period is None:
+        return list(exceptions)
+    result = []
+    for item in exceptions:
+        item_period = pd.Timestamp(item.exception_date).to_period("M")
+        if item_period == period:
+            result.append(item)
+    return result
+
+
 def _hhmm_to_minutes(value: str) -> int:
     text = str(value).strip()
     if ":" not in text:
@@ -219,6 +255,12 @@ class ProcessorService:
         if progress_callback:
             progress_callback(10, "Leyendo reporte Hikvision...")
         source_df = load_hikvision_excel(source)
+        source_df, selected_period = _filter_to_report_month(source_df)
+        if progress_callback and selected_period is not None:
+            progress_callback(
+                14,
+                f"Filtrando reporte al mes {selected_period.strftime('%Y-%m')} (mes predominante).",
+            )
 
         file_exceptions: list = []
         manual_exceptions: list = []
@@ -249,6 +291,7 @@ class ProcessorService:
             merge_exceptions(file_exceptions, manual_exceptions),
             template_absences,
         )
+        merged_exceptions = _filter_exceptions_to_report_month(merged_exceptions, selected_period)
 
         info_path_candidates = [
             Path("date.xlsx"),
@@ -258,6 +301,7 @@ class ProcessorService:
         ]
         schedule_minutes: dict[str, int] = {}
         start_minutes: dict[str, int] = {}
+        working_weekdays_by_employee: dict[str, set[int]] = {}
         for candidate in info_path_candidates:
             if candidate.exists():
                 try:
@@ -270,6 +314,10 @@ class ProcessorService:
                     start_minutes = {
                         employee_id: values["start_minute"] for employee_id, values in profiles.items()
                     }
+                    working_weekdays_by_employee = {
+                        employee_id: set(values.get("working_weekdays", {0, 1, 2, 3, 4}))
+                        for employee_id, values in profiles.items()
+                    }
                 except ScheduleInfoError as exc:
                     raise ValidationError(str(exc)) from exc
                 break
@@ -281,6 +329,7 @@ class ProcessorService:
             exceptions=merged_exceptions,
             scheduled_minutes_by_employee=schedule_minutes,
             scheduled_start_minute_by_employee=start_minutes,
+            working_weekdays_by_employee=working_weekdays_by_employee,
         )
 
         if progress_callback:

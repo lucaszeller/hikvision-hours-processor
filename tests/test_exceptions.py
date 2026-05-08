@@ -149,3 +149,28 @@ def test_absences_template_sets_paid_day_only_when_aprobado(tmp_path: Path) -> N
     assert by_type["Vacaciones"].paid_day is True
     assert by_type["Enfermedad"].paid_day is False
     assert by_type["Art"].paid_day is False
+
+
+def test_absences_template_legajo_1_maps_to_global_exception(tmp_path: Path) -> None:
+    template_path = tmp_path / "date.xlsx"
+    empleados_df = pd.DataFrame({"Id": ["20"], "Nombre": ["Ana"]})
+    ausencias_df = pd.DataFrame(
+        {
+            "Legajo": ["1"],
+            "Tipo ausencia": ["FERIADO"],
+            "Fecha desde": ["2026-07-09"],
+            "Fecha hasta": ["2026-07-09"],
+            "Estado": ["APROBADO"],
+            "Observación": ["Global"],
+        }
+    )
+    with pd.ExcelWriter(template_path, engine="openpyxl") as writer:
+        empleados_df.to_excel(writer, sheet_name="Empleados", index=False)
+        ausencias_df.to_excel(writer, sheet_name="Ausencias", index=False)
+
+    results = load_absences_template_file(template_path)
+
+    assert len(results) == 1
+    assert results[0].employee_id is None
+    assert results[0].exception_type == "Feriado"
+    assert results[0].paid_day is True

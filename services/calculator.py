@@ -139,6 +139,7 @@ def process_punches(
     exceptions: list[WorkException] | None = None,
     scheduled_minutes_by_employee: dict[str, int] | None = None,
     scheduled_start_minute_by_employee: dict[str, int] | None = None,
+    working_weekdays_by_employee: dict[str, set[int]] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     valid_segments: list[dict] = []
     inconsistencies: list[dict] = []
@@ -149,6 +150,7 @@ def process_punches(
     exceptions = exceptions or []
     scheduled_minutes_by_employee = scheduled_minutes_by_employee or {}
     scheduled_start_minute_by_employee = scheduled_start_minute_by_employee or {}
+    working_weekdays_by_employee = working_weekdays_by_employee or {}
     has_schedule_reference = bool(scheduled_minutes_by_employee)
     exceptions_index = build_exception_index(exceptions)
     used_exception_keys: set[tuple[str | None, date, str, str]] = set()
@@ -214,9 +216,14 @@ def process_punches(
         is_saturday = weekday == 5
         is_sunday = weekday == 6
         is_weekend = is_saturday or is_sunday
+        configured_days = working_weekdays_by_employee.get(employee_id, {0, 1, 2, 3, 4})
+        is_non_working_day = weekday is not None and weekday not in configured_days
 
         # Regla: lunes a viernes normales; fines de semana sólo si hay fichada.
         if is_weekend and not (has_entry or has_exit):
+            continue
+        # Regla por empleado: si no trabaja ese dia y no hay fichada, no marcar ausente.
+        if is_non_working_day and not (has_entry or has_exit):
             continue
 
         late_marker = _marker_is_positive(row.get("late_raw", ""))
@@ -237,7 +244,12 @@ def process_punches(
             if department:
                 day_state["departments"].add(department)
             day_state["late"] = bool(day_state["late"]) or late_marker
-            missing_both_without_exception = not has_entry and not has_exit and not row_exceptions
+            missing_both_without_exception = (
+                not has_entry
+                and not has_exit
+                and not row_exceptions
+                and not is_non_working_day
+            )
             day_state["absent"] = bool(day_state["absent"]) or absent_marker or missing_both_without_exception
             for exc in row_exceptions:
                 exc_type = str(exc.exception_type).strip()
@@ -382,32 +394,39 @@ def process_punches(
 
     # Asegura que excepciones (por ejemplo desde date.xlsx/Ausencias) aparezcan en Diario
     # aunque no exista fila/fichada de Hikvision para ese empleado y fecha.
+    known_employee_ids: set[str] = set(employee_name_by_id.keys()) | {
+        str(emp_id).strip() for emp_id in scheduled_minutes_by_employee.keys()
+    }
+
     for item in exceptions:
         employee_id = (item.employee_id or "").strip()
         if employee_id == "":
-            # Excepcion global: se evaluara con las filas existentes.
-            continue
+            # Excepcion global: aplica a todos los empleados conocidos.
+            target_ids = sorted([emp_id for emp_id in known_employee_ids if emp_id != ""])
+        else:
+            target_ids = [employee_id]
 
-        employee_name = employee_name_by_id.get(employee_id, "")
-        day_key = (employee_id, employee_name, item.exception_date)
-        day_state = day_flags.setdefault(
-            day_key,
-            {
-                "late": False,
-                "absent": False,
-                "departments": set(),
-                "exception_types": [],
-                "paid_exception": False,
-            },
-        )
-        for dep in departments_by_id.get(employee_id, set()):
-            day_state["departments"].add(dep)
+        for target_id in target_ids:
+            employee_name = employee_name_by_id.get(target_id, "")
+            day_key = (target_id, employee_name, item.exception_date)
+            day_state = day_flags.setdefault(
+                day_key,
+                {
+                    "late": False,
+                    "absent": False,
+                    "departments": set(),
+                    "exception_types": [],
+                    "paid_exception": False,
+                },
+            )
+            for dep in departments_by_id.get(target_id, set()):
+                day_state["departments"].add(dep)
 
-        exc_type = str(item.exception_type).strip()
-        if exc_type and exc_type not in day_state["exception_types"]:
-            day_state["exception_types"].append(exc_type)
-        if bool(getattr(item, "paid_day", False)):
-            day_state["paid_exception"] = True
+            exc_type = str(item.exception_type).strip()
+            if exc_type and exc_type not in day_state["exception_types"]:
+                day_state["exception_types"].append(exc_type)
+            if bool(getattr(item, "paid_day", False)):
+                day_state["paid_exception"] = True
 
         used_exception_keys.add(
             (item.employee_id, item.exception_date, item.exception_type.strip(), item.details.strip())
@@ -475,7 +494,8 @@ def process_punches(
             first_entry = group["entry_dt"].min()
             first_entry_minutes = first_entry.hour * 60 + first_entry.minute
             day_first_entry_minutes[(str(employee_id), str(employee_name), work_date)] = first_entry_minutes
-            if work_date.weekday() in {5, 6}:
+            employee_days = working_weekdays_by_employee.get(str(employee_id).strip(), {0, 1, 2, 3, 4})
+            if work_date.weekday() in {5, 6} or work_date.weekday() not in employee_days:
                 overtime_minutes = rounded_total
             else:
                 scheduled_minutes = scheduled_minutes_by_employee.get(str(employee_id).strip())

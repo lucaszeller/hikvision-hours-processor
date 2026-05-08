@@ -33,11 +33,13 @@ STATUS_STYLES = {
     "sancion sin goce de sueldo": {"fill": PatternFill("solid", fgColor="90CAF9"), "font": None},  # azul
     "no trabajado": {"fill": PatternFill("solid", fgColor="D7CCC8"), "font": None},  # marron claro
     "licencia": {"fill": PatternFill("solid", fgColor="FFCC80"), "font": None},  # naranja
+    "enfermedad": {"fill": PatternFill("solid", fgColor="FFCC80"), "font": None},  # naranja
     "feriado": {"fill": PatternFill("solid", fgColor="A9DF8F"), "font": Font(color="14532D", bold=True)},  # verde manzana
     "accidente de trabajo": {
         "fill": PatternFill("solid", fgColor="8E24AA"),  # violeta
         "font": Font(color="FFFFFF", bold=True),
     },
+    "art": {"fill": PatternFill("solid", fgColor="8E24AA"), "font": Font(color="FFFFFF", bold=True)},  # alias
 }
 THIN_BORDER = Border(
     left=Side(style="thin", color="D9D9D9"),
@@ -92,6 +94,17 @@ SHEET_LAYOUTS = {
         "wrap_cols": set(),
         "date_cols": set(),
         "priority_sort": ["Dia de semana", "Nombre del empleado"],
+    },
+    "Liquidar": {
+        "widths": {
+            "Fecha": 12,
+            "Dia": 14,
+            "Dia #": 8,
+        },
+        "left_cols": {"Dia"},
+        "wrap_cols": set(),
+        "date_cols": {"Fecha"},
+        "priority_sort": ["Fecha"],
     },
 }
 
@@ -166,6 +179,220 @@ def _build_study_summary(daily_df: pd.DataFrame) -> pd.DataFrame:
     return summary
 
 
+def _load_employee_catalog(base_dir: Path) -> tuple[list[tuple[str, str, str]], bool]:
+    candidates = [base_dir / "date.xlsx", base_dir / "info.xlsx"]
+    result: list[tuple[str, str, str]] = []
+    by_id: dict[str, str] = {}
+    loaded_from_file = False
+
+    def _normalize(text: object) -> str:
+        clean = unicodedata.normalize("NFKD", str(text)).encode("ascii", "ignore").decode("ascii")
+        return " ".join(clean.strip().lower().replace("_", " ").split())
+
+    def _clean_id(value: object) -> str:
+        if pd.isna(value):
+            return ""
+        text = str(value).strip()
+        if text.lower() in {"", "nan", "none", "nat", "-"}:
+            return ""
+        if text.endswith(".0") and text[:-2].isdigit():
+            return text[:-2]
+        return text
+
+    for path in candidates:
+        if not path.exists():
+            continue
+        try:
+            excel = pd.ExcelFile(path)
+            sheet_map = {_normalize(name): name for name in excel.sheet_names}
+            sheet_name = sheet_map.get(_normalize("Empleados"))
+            if sheet_name is not None:
+                df = pd.read_excel(path, sheet_name=sheet_name)
+            else:
+                df = pd.read_excel(path)
+        except Exception:
+            continue
+
+        if df.empty:
+            continue
+        columns = [str(c) for c in df.columns]
+        col_map = {_normalize(c): c for c in columns}
+        id_col = None
+        name_col = None
+        for key, original in col_map.items():
+            if id_col is None and ("id" == key or "legajo" in key or "id de persona" in key):
+                id_col = original
+            if name_col is None and ("nombre" == key or "empleado" in key or "name" == key):
+                name_col = original
+        if id_col is None:
+            continue
+
+        for _, row in df.iterrows():
+            emp_id = _clean_id(row.get(id_col, ""))
+            if not emp_id:
+                continue
+            emp_name = str(row.get(name_col, "")).strip() if name_col else ""
+            if emp_name.lower() in {"", "nan", "none", "nat", "-"}:
+                emp_name = f"ID {emp_id}"
+            if emp_id not in by_id:
+                by_id[emp_id] = emp_name
+        loaded_from_file = True
+        break
+
+    for emp_id, emp_name in by_id.items():
+        result.append((emp_id, emp_name, f"{emp_id} {emp_name}"))
+    result.sort(key=lambda item: (item[1].lower(), item[0]))
+    return result, loaded_from_file
+
+
+def _build_liquidar_sheet(
+    daily_df: pd.DataFrame,
+    base_dir: Path,
+) -> tuple[pd.DataFrame, dict[tuple[int, int], str]]:
+    cols_base = ["Fecha", "Dia", "Dia #"]
+    if daily_df.empty:
+        return pd.DataFrame(columns=cols_base), {}
+
+    needed = {"Fecha", "ID de persona", "Nombre", "Minutos redondeados", "Minutos extra", "Estado"}
+    if not needed.issubset(set(daily_df.columns)):
+        return pd.DataFrame(columns=cols_base), {}
+
+    working = daily_df.copy()
+    working["_fecha"] = pd.to_datetime(working["Fecha"], errors="coerce")
+    working = working[working["_fecha"].notna()].copy()
+    if working.empty:
+        return pd.DataFrame(columns=cols_base), {}
+
+    def _clean_id(value: object) -> str:
+        text = str(value).strip()
+        if text.endswith(".0") and text[:-2].isdigit():
+            return text[:-2]
+        return text
+
+    catalog, loaded_from_file = _load_employee_catalog(base_dir)
+    from_daily: dict[str, str] = {}
+    for _, row in working.iterrows():
+        emp_id = _clean_id(row["ID de persona"])
+        emp_name = str(row["Nombre"]).strip()
+        if emp_id and emp_id not in from_daily:
+            from_daily[emp_id] = emp_name
+
+    catalog_by_id = {emp_id: (emp_name, label) for emp_id, emp_name, label in catalog}
+    # Si no hay plantilla de empleados disponible, usa fallback desde el Diario.
+    # Si hay date.xlsx/info.xlsx cargado, respeta solo esos empleados.
+    if not loaded_from_file:
+        for emp_id, emp_name in from_daily.items():
+            if emp_id not in catalog_by_id:
+                catalog_by_id[emp_id] = (emp_name, f"{emp_id} {emp_name}")
+
+    employees = [(emp_id, name, label) for emp_id, (name, label) in catalog_by_id.items()]
+    employees.sort(key=lambda item: (item[1].lower(), item[0]))
+    employee_labels = [item[2] for item in employees]
+
+    day_names = ["Lunes", "Martes", "Miercoles", "Jueves", "Viernes", "Sabado", "Domingo"]
+    by_key: dict[tuple[pd.Timestamp, str], dict] = {}
+    for _, row in working.iterrows():
+        day = row["_fecha"].normalize()
+        emp_id = _clean_id(row["ID de persona"])
+        by_key[(day, emp_id)] = row
+
+    min_day = working["_fecha"].min().normalize()
+    max_day = working["_fecha"].max().normalize()
+    all_days = [day for day in pd.date_range(min_day, max_day, freq="D") if int(day.weekday()) < 5]
+
+    rows: list[dict[str, object]] = []
+    cell_status_map: dict[tuple[int, int], str] = {}
+    for row_offset, day in enumerate(all_days, start=0):
+        row_data: dict[str, object] = {
+            "Fecha": day.date(),
+            "Dia": day_names[int(day.weekday())],
+            "Dia #": int(day.day),
+        }
+        for emp_index, (emp_id, _, label) in enumerate(employees, start=0):
+            rec = by_key.get((day, emp_id))
+            if rec is None:
+                row_data[label] = ""
+                continue
+            total_minutes = int(pd.to_numeric(rec.get("Minutos redondeados", 0), errors="coerce") or 0)
+            extra_minutes = int(pd.to_numeric(rec.get("Minutos extra", 0), errors="coerce") or 0)
+            normal_minutes = max(0, total_minutes - extra_minutes)
+            row_data[label] = round(normal_minutes / 60, 2)
+            status = str(rec.get("Estado", "")).strip()
+            # Excel row starts at 2 (header in row 1), and employee cols start after A,B,C
+            cell_status_map[(2 + row_offset, 4 + emp_index)] = status
+        rows.append(row_data)
+
+    liquidar_df = pd.DataFrame(rows, columns=cols_base + employee_labels)
+    return liquidar_df, cell_status_map
+
+
+def _apply_liquidar_format(
+    worksheet,
+    status_cells: dict[tuple[int, int], str],
+) -> None:
+    headers = [cell.value for cell in worksheet[1]]
+    header_to_idx = {str(value): idx + 1 for idx, value in enumerate(headers) if value is not None}
+
+    worksheet.freeze_panes = "D2"
+    worksheet.auto_filter.ref = worksheet.dimensions
+
+    for cell in worksheet[1]:
+        cell.fill = HEADER_FILL
+        cell.font = HEADER_FONT
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+        cell.border = THIN_BORDER
+
+    for header, width in SHEET_LAYOUTS["Liquidar"]["widths"].items():
+        col_idx = header_to_idx.get(header)
+        if col_idx:
+            worksheet.column_dimensions[get_column_letter(col_idx)].width = width
+
+    for col_idx in range(4, worksheet.max_column + 1):
+        worksheet.column_dimensions[get_column_letter(col_idx)].width = 17
+
+    # Add totals row
+    totals_row = worksheet.max_row + 1
+    worksheet.cell(row=totals_row, column=2, value="Totales")
+    worksheet.merge_cells(start_row=totals_row, start_column=2, end_row=totals_row, end_column=3)
+    for col_idx in range(4, worksheet.max_column + 1):
+        col_letter = get_column_letter(col_idx)
+        worksheet.cell(row=totals_row, column=col_idx, value=f"=SUM({col_letter}2:{col_letter}{totals_row-1})")
+
+    for row_idx in range(2, worksheet.max_row + 1):
+        for col_idx in range(1, worksheet.max_column + 1):
+            cell = worksheet.cell(row=row_idx, column=col_idx)
+            cell.border = THIN_BORDER
+            if row_idx % 2 == 0 and row_idx < totals_row:
+                cell.fill = ALT_ROW_FILL
+            if col_idx == 1 and row_idx < totals_row and cell.value not in ("", None):
+                cell.number_format = "DD/MM/YYYY"
+            if col_idx >= 4:
+                cell.number_format = "0.00"
+
+            horizontal = "center"
+            if col_idx in {2}:
+                horizontal = "left"
+            cell.alignment = Alignment(horizontal=horizontal, vertical="center")
+
+    # Color cells by status for liquidation view
+    for (row_idx, col_idx), status in status_cells.items():
+        style = _status_style(status)
+        fill = style.get("fill")
+        font = style.get("font")
+        cell = worksheet.cell(row=row_idx, column=col_idx)
+        if fill is not None:
+            cell.fill = fill
+        if font is not None:
+            cell.font = font
+
+    # Totals row style
+    for col_idx in range(1, worksheet.max_column + 1):
+        cell = worksheet.cell(row=totals_row, column=col_idx)
+        cell.fill = PatternFill("solid", fgColor="E2E8F0")
+        cell.font = Font(color="0F172A", bold=True)
+        cell.border = THIN_BORDER
+
+
 def _apply_sheet_format(worksheet, sheet_name: str) -> None:
     config = SHEET_LAYOUTS[sheet_name]
     headers = [cell.value for cell in worksheet[1]]
@@ -230,15 +457,18 @@ def export_report(
     diario_export = _sort_for_report(daily_df.copy(), SHEET_LAYOUTS["Diario"]["priority_sort"])
     mensual_export = _sort_for_report(monthly_df.copy(), SHEET_LAYOUTS["Mensual"]["priority_sort"])
     resumen_estudio_export = _build_study_summary(diario_export)
+    liquidar_export, liquidar_status_cells = _build_liquidar_sheet(diario_export, output.parent)
     try:
         with pd.ExcelWriter(temp_output, engine="openpyxl") as writer:
             diario_export.to_excel(writer, sheet_name="Diario", index=False)
             mensual_export.to_excel(writer, sheet_name="Mensual", index=False)
             resumen_estudio_export.to_excel(writer, sheet_name="resumen-estudio", index=False)
+            liquidar_export.to_excel(writer, sheet_name="Liquidar", index=False)
 
             workbook = writer.book
             for sheet_name in ("Diario", "Mensual", "resumen-estudio"):
                 _apply_sheet_format(workbook[sheet_name], sheet_name)
+            _apply_liquidar_format(workbook["Liquidar"], liquidar_status_cells)
 
         temp_output.replace(output)
     except Exception as exc:
