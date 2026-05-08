@@ -9,6 +9,7 @@ import pandas as pd
 from services.calculator import process_punches
 from services.exceptions import (
     ExceptionConfigError,
+    load_absences_template_file,
     load_exceptions_file,
     merge_exceptions,
     parse_manual_exceptions,
@@ -219,8 +220,9 @@ class ProcessorService:
             progress_callback(10, "Leyendo reporte Hikvision...")
         source_df = load_hikvision_excel(source)
 
-        file_exceptions = []
-        manual_exceptions = []
+        file_exceptions: list = []
+        manual_exceptions: list = []
+        template_absences: list = []
 
         try:
             if exceptions_file is not None:
@@ -232,12 +234,28 @@ class ProcessorService:
                 if progress_callback:
                     progress_callback(35, "Cargando excepciones manuales...")
                 manual_exceptions = parse_manual_exceptions(manual_exceptions_text)
+
+            template_candidates = [Path("date.xlsx"), source.parent / "date.xlsx"]
+            for candidate in template_candidates:
+                if candidate.exists():
+                    if progress_callback:
+                        progress_callback(40, f"Cargando ausencias desde {candidate.name}...")
+                    template_absences = load_absences_template_file(candidate)
+                    break
         except ExceptionConfigError as exc:
             raise ValidationError(str(exc)) from exc
 
-        merged_exceptions = merge_exceptions(file_exceptions, manual_exceptions)
+        merged_exceptions = merge_exceptions(
+            merge_exceptions(file_exceptions, manual_exceptions),
+            template_absences,
+        )
 
-        info_path_candidates = [Path("info.xlsx"), source.parent / "info.xlsx"]
+        info_path_candidates = [
+            Path("date.xlsx"),
+            source.parent / "date.xlsx",
+            Path("info.xlsx"),
+            source.parent / "info.xlsx",
+        ]
         schedule_minutes: dict[str, int] = {}
         start_minutes: dict[str, int] = {}
         for candidate in info_path_candidates:

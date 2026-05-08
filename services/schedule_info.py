@@ -88,7 +88,13 @@ def load_schedule_profiles(info_path: str | Path) -> dict[str, dict[str, int]]:
         return {}
 
     try:
-        df = pd.read_excel(path)
+        excel = pd.ExcelFile(path)
+        normalized_sheets = {_normalize(name): name for name in excel.sheet_names}
+        preferred_sheet = normalized_sheets.get(_normalize("Empleados"))
+        if preferred_sheet is not None:
+            df = pd.read_excel(path, sheet_name=preferred_sheet)
+        else:
+            df = pd.read_excel(path)
     except Exception as exc:
         raise ScheduleInfoError(f"No se pudo leer archivo de horarios '{path}': {exc}") from exc
 
@@ -104,7 +110,7 @@ def load_schedule_profiles(info_path: str | Path) -> dict[str, dict[str, int]]:
     col_corrido = _best_column(columns, ["horario corrido", "corrido"])
 
     if col_id is None:
-        raise ScheduleInfoError("No se encontro columna de ID en info.xlsx.")
+        raise ScheduleInfoError("No se encontro columna de ID en el archivo de horarios.")
 
     result: dict[str, dict[str, int]] = {}
     for _, row in df.iterrows():

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 import csv
 import io
@@ -22,6 +22,7 @@ class WorkException:
     exception_date: date
     exception_type: str
     details: str
+    paid_day: bool = False
 
 
 def _normalize(text: object) -> str:
@@ -117,6 +118,121 @@ def _read_exceptions_dataframe(file_path: Path) -> pd.DataFrame:
     )
 
 
+def _normalize_sheet_name(value: object) -> str:
+    return _normalize(str(value))
+
+
+def _find_sheet_name(file_path: Path, candidates: list[str]) -> str | None:
+    if file_path.suffix.lower() not in {".xlsx", ".xls"}:
+        return None
+    try:
+        excel = pd.ExcelFile(file_path)
+    except Exception as exc:
+        raise ExceptionConfigError(f"No se pudo leer archivo de excepciones '{file_path}': {exc}") from exc
+
+    normalized_map = {_normalize_sheet_name(name): name for name in excel.sheet_names}
+    for candidate in candidates:
+        key = _normalize_sheet_name(candidate)
+        if key in normalized_map:
+            return normalized_map[key]
+    return None
+
+
+def _is_absences_template(file_path: Path) -> bool:
+    try:
+        return _find_sheet_name(file_path, ["Ausencias"]) is not None
+    except ExceptionConfigError:
+        return False
+
+
+def _build_exceptions_from_absences_dataframe(df: pd.DataFrame) -> list[WorkException]:
+    if df.empty:
+        return []
+
+    columns = [str(col) for col in df.columns]
+    employee_col = _find_column(columns, ["legajo", "id", "id de persona"])
+    type_col = _find_column(columns, ["tipo ausencia", "tipo", "type"])
+    from_col = _find_column(columns, ["fecha desde", "desde", "fecha inicio", "inicio"])
+    to_col = _find_column(columns, ["fecha hasta", "hasta", "fecha fin", "fin"])
+    state_col = _find_column(columns, ["estado", "status"])
+    details_col = _find_column(columns, ["observacion", "observación", "detalle", "nota"])
+
+    if employee_col is None or type_col is None or from_col is None:
+        raise ExceptionConfigError(
+            "La hoja 'Ausencias' debe tener columnas de Legajo, Tipo ausencia y Fecha desde."
+        )
+
+    ignored_states = {"cancelado"}
+    results: list[WorkException] = []
+    for _, row in df.iterrows():
+        raw_employee = _clean_optional(row.get(employee_col, ""))
+        raw_type = _clean_optional(row.get(type_col, ""))
+        raw_from = _clean_optional(row.get(from_col, ""))
+        raw_to = _clean_optional(row.get(to_col, "")) if to_col else ""
+        raw_state = _clean_optional(row.get(state_col, "")) if state_col else ""
+        raw_details = _clean_optional(row.get(details_col, "")) if details_col else ""
+
+        if raw_employee == "" and raw_type == "" and raw_from == "":
+            continue
+        if raw_employee == "":
+            raise ExceptionConfigError("Fila en 'Ausencias' sin Legajo.")
+        if raw_type == "":
+            raise ExceptionConfigError("Fila en 'Ausencias' sin Tipo ausencia.")
+        if raw_from == "":
+            raise ExceptionConfigError("Fila en 'Ausencias' sin Fecha desde.")
+
+        state_key = _normalize(raw_state)
+        if state_key in ignored_states:
+            continue
+
+        paid_day = state_key == "aprobado"
+
+        start_date = _parse_date(raw_from)
+        end_date = _parse_date(raw_to) if raw_to else start_date
+        if end_date < start_date:
+            raise ExceptionConfigError(
+                f"Rango invalido en 'Ausencias' para legajo {raw_employee}: Fecha hasta menor a Fecha desde."
+            )
+
+        exception_type = raw_type.strip().title()
+        details = raw_details
+        current = start_date
+        while current <= end_date:
+            results.append(
+                WorkException(
+                    employee_id=raw_employee or None,
+                    exception_date=current,
+                    exception_type=exception_type,
+                    details=details,
+                    paid_day=paid_day,
+                )
+            )
+            current += timedelta(days=1)
+
+    return results
+
+
+def load_absences_template_file(path: str | Path) -> list[WorkException]:
+    file_path = Path(path)
+    if not file_path.exists():
+        raise ExceptionConfigError(f"No existe el archivo de ausencias: {file_path}")
+    if file_path.suffix.lower() not in {".xlsx", ".xls"}:
+        return []
+
+    sheet_name = _find_sheet_name(file_path, ["Ausencias"])
+    if sheet_name is None:
+        return []
+
+    try:
+        df = pd.read_excel(file_path, sheet_name=sheet_name)
+    except Exception as exc:
+        raise ExceptionConfigError(
+            f"No se pudo leer la hoja '{sheet_name}' en '{file_path}': {exc}"
+        ) from exc
+
+    return _build_exceptions_from_absences_dataframe(df)
+
+
 def _write_exceptions_dataframe(file_path: Path, df: pd.DataFrame) -> None:
     suffix = file_path.suffix.lower()
     if suffix == ".csv":
@@ -181,6 +297,10 @@ def ensure_exceptions_file(path: str | Path) -> Path:
         _write_exceptions_dataframe(file_path, pd.DataFrame(columns=EXCEPTIONS_COLUMNS))
         return file_path
 
+    if _is_absences_template(file_path):
+        # Plantilla operacional (Empleados/Ausencias): no normalizar su estructura.
+        return file_path
+
     df = _read_exceptions_dataframe(file_path)
     standardized = _standardize_exceptions_dataframe(df)
     if list(df.columns) != list(standardized.columns):
@@ -193,8 +313,10 @@ def load_exceptions_file(path: str | Path) -> list[WorkException]:
     if not file_path.exists():
         raise ExceptionConfigError(f"No existe el archivo de excepciones: {file_path}")
 
-    df = _read_exceptions_dataframe(file_path)
+    if _is_absences_template(file_path):
+        return load_absences_template_file(file_path)
 
+    df = _read_exceptions_dataframe(file_path)
     return _build_exceptions_from_dataframe(df)
 
 
@@ -283,6 +405,10 @@ def append_manual_exceptions_to_file(
         return 0
 
     file_path = ensure_exceptions_file(path)
+    if _is_absences_template(file_path):
+        raise ExceptionConfigError(
+            "No se puede anexar carga manual al template de Ausencias. Usa un archivo de excepciones estandar."
+        )
     df = _standardize_exceptions_dataframe(_read_exceptions_dataframe(file_path))
 
     existing_keys: set[tuple[str, str, str, str]] = set()

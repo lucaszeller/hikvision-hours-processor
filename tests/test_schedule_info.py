@@ -26,3 +26,27 @@ def test_load_scheduled_minutes_for_split_and_continuous_shift(tmp_path: Path) -
 
     assert result["20"] == 540
     assert result["63"] == 480
+
+
+def test_load_scheduled_minutes_prefers_empleados_sheet_in_date_template(tmp_path: Path) -> None:
+    config_df = pd.DataFrame({"Tipos de ausencia": ["VACACIONES"]})
+    empleados_df = pd.DataFrame(
+        {
+            "Id": ["20"],
+            "Nombre": ["Ana"],
+            "horario ingreso Mañana": ["07:30:00"],
+            "Horario salida Mañana": ["12:00:00"],
+            "Horario Ingreso Tarde": ["13:00:00"],
+            "Horario Salida Tarde": ["17:30:00"],
+            "Horario corrido": ["NO"],
+        }
+    )
+
+    file_path = tmp_path / "date.xlsx"
+    with pd.ExcelWriter(file_path, engine="openpyxl") as writer:
+        config_df.to_excel(writer, sheet_name="Config", index=False)
+        empleados_df.to_excel(writer, sheet_name="Empleados", index=False)
+
+    result = load_scheduled_minutes(file_path)
+
+    assert result["20"] == 540

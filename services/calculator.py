@@ -143,6 +143,8 @@ def process_punches(
     valid_segments: list[dict] = []
     inconsistencies: list[dict] = []
     day_flags: dict[tuple[str, str, date], dict[str, object]] = {}
+    employee_name_by_id: dict[str, str] = {}
+    departments_by_id: dict[str, set[str]] = {}
 
     exceptions = exceptions or []
     scheduled_minutes_by_employee = scheduled_minutes_by_employee or {}
@@ -161,6 +163,12 @@ def process_punches(
         exit_raw = row.get("exit_time_raw", "")
 
         date_for_report = work_date_raw
+
+        if employee_id != "":
+            if employee_name and employee_id not in employee_name_by_id:
+                employee_name_by_id[employee_id] = employee_name
+            if department:
+                departments_by_id.setdefault(employee_id, set()).add(department)
 
         if employee_id == "":
             _inconsistency(
@@ -218,7 +226,13 @@ def process_punches(
             day_key = (employee_id, employee_name, date_parsed.date())
             day_state = day_flags.setdefault(
                 day_key,
-                {"late": False, "absent": False, "departments": set(), "exception_types": []},
+                {
+                    "late": False,
+                    "absent": False,
+                    "departments": set(),
+                    "exception_types": [],
+                    "paid_exception": False,
+                },
             )
             if department:
                 day_state["departments"].add(department)
@@ -229,6 +243,8 @@ def process_punches(
                 exc_type = str(exc.exception_type).strip()
                 if exc_type and exc_type not in day_state["exception_types"]:
                     day_state["exception_types"].append(exc_type)
+                if bool(getattr(exc, "paid_day", False)):
+                    day_state["paid_exception"] = True
 
         if not has_entry and not has_exit:
             if row_exceptions:
@@ -364,6 +380,39 @@ def process_punches(
             }
         )
 
+    # Asegura que excepciones (por ejemplo desde date.xlsx/Ausencias) aparezcan en Diario
+    # aunque no exista fila/fichada de Hikvision para ese empleado y fecha.
+    for item in exceptions:
+        employee_id = (item.employee_id or "").strip()
+        if employee_id == "":
+            # Excepcion global: se evaluara con las filas existentes.
+            continue
+
+        employee_name = employee_name_by_id.get(employee_id, "")
+        day_key = (employee_id, employee_name, item.exception_date)
+        day_state = day_flags.setdefault(
+            day_key,
+            {
+                "late": False,
+                "absent": False,
+                "departments": set(),
+                "exception_types": [],
+                "paid_exception": False,
+            },
+        )
+        for dep in departments_by_id.get(employee_id, set()):
+            day_state["departments"].add(dep)
+
+        exc_type = str(item.exception_type).strip()
+        if exc_type and exc_type not in day_state["exception_types"]:
+            day_state["exception_types"].append(exc_type)
+        if bool(getattr(item, "paid_day", False)):
+            day_state["paid_exception"] = True
+
+        used_exception_keys.add(
+            (item.employee_id, item.exception_date, item.exception_type.strip(), item.details.strip())
+        )
+
     for item in exceptions:
         key = (item.employee_id, item.exception_date, item.exception_type.strip(), item.details.strip())
         if key in used_exception_keys:
@@ -466,7 +515,13 @@ def process_punches(
             employee_id, employee_name, work_date = day_key
             state = day_flags.get(
                 day_key,
-                {"late": False, "absent": False, "departments": set(), "exception_types": []},
+                {
+                    "late": False,
+                    "absent": False,
+                    "departments": set(),
+                    "exception_types": [],
+                    "paid_exception": False,
+                },
             )
             row_data = day_rows.get(day_key)
 
@@ -478,21 +533,31 @@ def process_punches(
                 ):
                     continue
                 departments = sorted([d for d in state["departments"] if str(d).strip() != ""])
+                paid_exception = bool(state.get("paid_exception"))
+                scheduled_minutes = scheduled_minutes_by_employee.get(str(employee_id).strip(), 0)
+                paid_minutes = int(scheduled_minutes) if paid_exception and int(scheduled_minutes) > 0 else 0
                 row_data = {
                     "ID de persona": employee_id,
                     "Nombre": employee_name,
                     "Fecha": work_date,
                     "Departamento": " / ".join(departments),
                     "Tramos trabajados": "",
-                    "Minutos reales": 0,
-                    "Minutos redondeados": 0,
+                    "Minutos reales": paid_minutes,
+                    "Minutos redondeados": paid_minutes,
                     "Minutos extra": 0,
                     "Horas extra": "00:00",
-                    "Horas totales": "00:00",
+                    "Horas totales": _minutes_to_hhmm(paid_minutes),
                 }
 
             worked_minutes = int(row_data.get("Minutos redondeados", 0))
             if worked_minutes > 0:
+                if bool(state.get("paid_exception")) and (state.get("exception_types") or []) and str(
+                    row_data.get("Tramos trabajados", "")
+                ).strip() == "":
+                    status = str((state.get("exception_types") or ["Normal"])[0]).strip().title()
+                    row_data["Estado"] = status
+                    grouped_rows.append(row_data)
+                    continue
                 if work_date.weekday() == 6:
                     status = "Domingo"
                     row_data["Estado"] = status

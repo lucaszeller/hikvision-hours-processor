@@ -18,7 +18,7 @@ ALT_ROW_FILL = PatternFill("solid", fgColor="F5F8FC")
 STATUS_STYLES = {
     # Base
     "normal": {"fill": None, "font": None},
-    "domingo": {"fill": PatternFill("solid", fgColor="D9D9D9"), "font": None},  # gris claro
+    "domingo": {"fill": PatternFill("solid", fgColor="D9D9D9"), "font": None},  # gris
     "tarde": {"fill": PatternFill("solid", fgColor="2E7D32"), "font": Font(color="FFFFFF", bold=True)},  # verde oscuro
     "tardanza": {"fill": PatternFill("solid", fgColor="2E7D32"), "font": Font(color="FFFFFF", bold=True)},
     "ausente": {"fill": PatternFill("solid", fgColor="EF9A9A"), "font": Font(color="7F1D1D", bold=True)},  # rojo
@@ -26,16 +26,16 @@ STATUS_STYLES = {
     # Excepciones solicitadas
     "vacaciones": {"fill": PatternFill("solid", fgColor="FFF59D"), "font": None},  # amarillo
     "estudiar": {"fill": PatternFill("solid", fgColor="B3E5FC"), "font": None},  # celeste
-    "capacitacion": {"fill": PatternFill("solid", fgColor="D1C4E9"), "font": None},  # morado claro
-    "sancion sin goce de sueldo": {
-        "fill": PatternFill("solid", fgColor="90CAF9"),  # azul
-        "font": None,
-    },
-    "no trabajado": {"fill": PatternFill("solid", fgColor="FFF9C4"), "font": None},  # amarillo claro
+    "capacitacion": {"fill": PatternFill("solid", fgColor="F8BBD0"), "font": None},  # rosado
+    "capacitaciones": {"fill": PatternFill("solid", fgColor="F8BBD0"), "font": None},  # rosado
+    "suspencion": {"fill": PatternFill("solid", fgColor="90CAF9"), "font": None},  # azul
+    "suspension": {"fill": PatternFill("solid", fgColor="90CAF9"), "font": None},  # azul
+    "sancion sin goce de sueldo": {"fill": PatternFill("solid", fgColor="90CAF9"), "font": None},  # azul
+    "no trabajado": {"fill": PatternFill("solid", fgColor="D7CCC8"), "font": None},  # marron claro
     "licencia": {"fill": PatternFill("solid", fgColor="FFCC80"), "font": None},  # naranja
     "feriado": {"fill": PatternFill("solid", fgColor="A9DF8F"), "font": Font(color="14532D", bold=True)},  # verde manzana
     "accidente de trabajo": {
-        "fill": PatternFill("solid", fgColor="8E24AA"),  # violeta fuerte
+        "fill": PatternFill("solid", fgColor="8E24AA"),  # violeta
         "font": Font(color="FFFFFF", bold=True),
     },
 }

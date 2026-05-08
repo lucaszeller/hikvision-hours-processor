@@ -108,6 +108,115 @@ def test_exception_replaces_missing_mark_inconsistency() -> None:
     assert "Feriado" in inconsistencies.iloc[0]["Detalle"]
 
 
+def test_exception_from_template_is_rendered_even_without_source_row_for_date() -> None:
+    df = pd.DataFrame(
+        {
+            "employee_id": ["20"],
+            "employee_name": ["Ana"],
+            "department": ["A"],
+            "schedule": [""],
+            "work_date_raw": ["2026-05-01"],
+            "entry_time_raw": ["07:30"],
+            "exit_time_raw": ["12:00"],
+        }
+    )
+
+    exceptions = [
+        WorkException(
+            employee_id="20",
+            exception_date=pd.Timestamp("2026-05-03").date(),
+            exception_type="Enfermedad",
+            details="Licencia medica",
+        )
+    ]
+
+    daily, monthly, inconsistencies = process_punches(
+        df,
+        exceptions=exceptions,
+        scheduled_minutes_by_employee={"20": 240},
+        scheduled_start_minute_by_employee={"20": 450},
+    )
+
+    # Debe existir el dia de enfermedad aunque no haya fila/fichada ese dia.
+    by_date = {str(row["Fecha"]): row for _, row in daily.iterrows()}
+    assert "2026-05-03" in by_date
+    assert by_date["2026-05-03"]["Estado"] == "Enfermedad"
+    assert by_date["2026-05-03"]["Horas totales"] == "00:00"
+
+    # Mensual suma ambos dias (trabajado + excepcion con 0 horas).
+    assert len(monthly) == 1
+    assert int(monthly.iloc[0]["Dias trabajados"]) == 2
+    # No debe quedar "Excepcion configurada sin uso".
+    issue_types = set(inconsistencies["Tipo de inconsistencia"]) if not inconsistencies.empty else set()
+    assert "Excepcion configurada sin uso" not in issue_types
+
+
+def test_approved_template_exception_pays_day_pending_rejected_do_not() -> None:
+    df = pd.DataFrame(
+        {
+            "employee_id": ["20"],
+            "employee_name": ["Ana"],
+            "department": ["A"],
+            "schedule": [""],
+            "work_date_raw": ["2026-06-01"],
+            "entry_time_raw": ["07:30"],
+            "exit_time_raw": ["12:00"],
+        }
+    )
+
+    exceptions = [
+        WorkException(
+            employee_id="20",
+            exception_date=pd.Timestamp("2026-06-02").date(),
+            exception_type="Vacaciones",
+            details="Aprobado",
+            paid_day=True,
+        ),
+        WorkException(
+            employee_id="20",
+            exception_date=pd.Timestamp("2026-06-03").date(),
+            exception_type="Enfermedad",
+            details="Pendiente",
+            paid_day=False,
+        ),
+        WorkException(
+            employee_id="20",
+            exception_date=pd.Timestamp("2026-06-04").date(),
+            exception_type="Art",
+            details="Rechazado",
+            paid_day=False,
+        ),
+    ]
+
+    daily, monthly, _ = process_punches(
+        df,
+        exceptions=exceptions,
+        scheduled_minutes_by_employee={"20": 540},
+        scheduled_start_minute_by_employee={"20": 450},
+    )
+
+    by_date = {str(row["Fecha"]): row for _, row in daily.iterrows()}
+
+    # Aprobado: dia pago con horas normales del horario (09:00).
+    assert by_date["2026-06-02"]["Estado"] == "Vacaciones"
+    assert int(by_date["2026-06-02"]["Minutos redondeados"]) == 540
+    assert by_date["2026-06-02"]["Horas totales"] == "09:00"
+    assert int(by_date["2026-06-02"]["Minutos extra"]) == 0
+
+    # Pendiente/Rechazado: se muestra el estado pero no paga minutos/horas.
+    assert by_date["2026-06-03"]["Estado"] == "Enfermedad"
+    assert int(by_date["2026-06-03"]["Minutos redondeados"]) == 0
+    assert by_date["2026-06-03"]["Horas totales"] == "00:00"
+
+    assert by_date["2026-06-04"]["Estado"] == "Art"
+    assert int(by_date["2026-06-04"]["Minutos redondeados"]) == 0
+    assert by_date["2026-06-04"]["Horas totales"] == "00:00"
+
+    assert len(monthly) == 1
+    # 06-01 trabajado 04:30 (270) + 06-02 pago 09:00 (540) = 810
+    assert int(monthly.iloc[0]["Minutos totales"]) == 810
+
+
 def test_marks_late_and_absent_status_for_daily_cells() -> None:
     df = pd.DataFrame(
         {

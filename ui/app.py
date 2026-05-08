@@ -1176,19 +1176,34 @@ class HikvisionApp(ctk.CTk):
     def _refresh_employee_options(self, source_path: Path | None = None) -> None:
         by_id: dict[str, str] = {}
 
-        info_path = Path(__file__).resolve().parent.parent / "info.xlsx"
-        if info_path.exists():
+        root = Path(__file__).resolve().parent.parent
+        base_candidates = [root / "date.xlsx", root / "info.xlsx"]
+        for base_path in base_candidates:
+            if not base_path.exists():
+                continue
             try:
-                info_df = pd.read_excel(info_path)
-                info_pairs = self._extract_employee_pairs(
-                    info_df,
+                sheet_to_use = None
+                if base_path.suffix.lower() in {".xlsx", ".xls"}:
+                    excel = pd.ExcelFile(base_path)
+                    normalized_map = {
+                        self._normalize_label(sheet_name): sheet_name for sheet_name in excel.sheet_names
+                    }
+                    sheet_to_use = normalized_map.get(self._normalize_label("Empleados"))
+                if sheet_to_use is not None:
+                    base_df = pd.read_excel(base_path, sheet_name=sheet_to_use)
+                else:
+                    base_df = pd.read_excel(base_path)
+
+                base_pairs = self._extract_employee_pairs(
+                    base_df,
                     id_aliases=["id", "legajo", "id de persona"],
                     name_aliases=["nombre", "name", "empleado"],
                 )
-                for emp_id, emp_name in info_pairs:
+                for emp_id, emp_name in base_pairs:
                     by_id[emp_id] = emp_name
+                break
             except Exception as exc:
-                self.log(f"No se pudo cargar lista de trabajadores desde info.xlsx: {exc}")
+                self.log(f"No se pudo cargar lista de trabajadores desde {base_path.name}: {exc}")
 
         try:
             if source_path is not None:
