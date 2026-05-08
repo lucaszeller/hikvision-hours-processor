@@ -47,6 +47,24 @@ COLOR_STATUS_WORKING_TEXT = ("#92400E", "#FDE68A")
 COLOR_STATUS_WORKING_BG_ALT = ("#FDE68A", "#4A3A0A")
 COLOR_STATUS_ERROR_BG = ("#FEE2E2", "#3D1111")
 COLOR_STATUS_ERROR_TEXT = ("#991B1B", "#FCA5A5")
+COLOR_KPI_NEUTRAL = ("#D7EEF7", "#12384A")
+COLOR_KPI_POSITIVE = ("#DCFCE7", "#163823")
+COLOR_KPI_ALERT = ("#FEE2E2", "#3A1616")
+COLOR_KPI_WARNING = ("#FEF3C7", "#3B3312")
+COLOR_CHIP_NEUTRAL_BG = ("#E2E8F0", "#1F2937")
+COLOR_CHIP_NEUTRAL_TEXT = ("#334155", "#CBD5E1")
+COLOR_CHIP_OK_BG = ("#DCFCE7", "#173124")
+COLOR_CHIP_OK_TEXT = ("#166534", "#86EFAC")
+COLOR_CHIP_WARN_BG = ("#FEF3C7", "#3F3208")
+COLOR_CHIP_WARN_TEXT = ("#92400E", "#FDE68A")
+COLOR_CHIP_ERROR_BG = ("#FEE2E2", "#3D1111")
+COLOR_CHIP_ERROR_TEXT = ("#991B1B", "#FCA5A5")
+COLOR_CHIP_WORKING_BG = ("#E0F2FE", "#0B2740")
+COLOR_CHIP_WORKING_TEXT = ("#0C4A6E", "#67E8F9")
+COLOR_LOG_INFO = ("#0F172A", "#E5E7EB")
+COLOR_LOG_SUCCESS = ("#166534", "#86EFAC")
+COLOR_LOG_WARN = ("#92400E", "#FDE68A")
+COLOR_LOG_ERROR = ("#B91C1C", "#FCA5A5")
 
 
 class HikvisionApp(ctk.CTk):
@@ -105,6 +123,17 @@ class HikvisionApp(ctk.CTk):
         self._logo_image: tk.PhotoImage | None = None
         self._logo_badge: ctk.CTkFrame | None = None
         self._logo_label: ctk.CTkLabel | None = None
+        self._kpi_cards: dict[str, dict[str, object]] = {}
+        self.report_hero_title: ctk.CTkLabel | None = None
+        self.report_hero_subtitle: ctk.CTkLabel | None = None
+        self.health_chip_file: ctk.CTkLabel | None = None
+        self.health_chip_exceptions: ctk.CTkLabel | None = None
+        self.health_chip_run: ctk.CTkLabel | None = None
+        self._log_text_widget: tk.Text | None = None
+        self._page_frames: dict[str, ctk.CTkFrame] = {}
+        self._page_transition_after: str | None = None
+        self._page_transition_running: bool = False
+        self._pending_page: str | None = None
         self._employee_selector_values: list[str] = ["Todos"]
         self._employee_label_to_id: dict[str, str] = {"Todos": ""}
         self._status_pulse_job: str | None = None
@@ -191,14 +220,20 @@ class HikvisionApp(ctk.CTk):
 
         self.report_page = self._build_report_page(self.content)
         self.exceptions_page = self._build_exceptions_page(self.content)
+        self._page_frames = {
+            "report": self.report_page,
+            "exceptions": self.exceptions_page,
+        }
 
-        self.report_page.grid(row=0, column=0, sticky="nsew")
-        self.exceptions_page.grid(row=0, column=0, sticky="nsew")
+        self.report_page.place(x=0, y=0, relwidth=1, relheight=1)
+        self.exceptions_page.place(x=0, y=0, relwidth=1, relheight=1)
+        self.report_page.lift()
+        self.exceptions_page.lower()
 
         self._reset_kpis()
         self._refresh_exceptions_summary()
         self._refresh_context_panel()
-        self._show_page("report")
+        self._show_page("report", animate=False)
 
     def _style_primary_button(self, button: ctk.CTkButton, *, height: int | None = None) -> None:
         kwargs: dict[str, object] = {
@@ -230,6 +265,201 @@ class HikvisionApp(ctk.CTk):
         if label is not None:
             label.configure(text=value)
 
+    def _theme_color(self, pair: tuple[str, str] | str) -> str:
+        if isinstance(pair, str):
+            return pair
+        mode = ctk.get_appearance_mode().lower()
+        return pair[1] if mode == "dark" else pair[0]
+
+    def _set_chip_state(self, chip: ctk.CTkLabel | None, text: str, level: str) -> None:
+        if chip is None:
+            return
+        palette = {
+            "neutral": {"fg": COLOR_CHIP_NEUTRAL_BG, "text": COLOR_CHIP_NEUTRAL_TEXT},
+            "ok": {"fg": COLOR_CHIP_OK_BG, "text": COLOR_CHIP_OK_TEXT},
+            "warn": {"fg": COLOR_CHIP_WARN_BG, "text": COLOR_CHIP_WARN_TEXT},
+            "error": {"fg": COLOR_CHIP_ERROR_BG, "text": COLOR_CHIP_ERROR_TEXT},
+            "working": {"fg": COLOR_CHIP_WORKING_BG, "text": COLOR_CHIP_WORKING_TEXT},
+        }
+        colors = palette.get(level, palette["neutral"])
+        chip.configure(text=text, fg_color=colors["fg"], text_color=colors["text"])
+
+    def _refresh_health_chips(self) -> None:
+        file_loaded = self.selected_file is not None
+        exceptions_loaded = self.exceptions_file is not None
+        is_running = bool(self._worker_thread and self._worker_thread.is_alive())
+        has_output = self.output_file is not None
+
+        self._set_chip_state(
+            self.health_chip_file,
+            "Archivo: cargado" if file_loaded else "Archivo: pendiente",
+            "ok" if file_loaded else "warn",
+        )
+        self._set_chip_state(
+            self.health_chip_exceptions,
+            "Excepciones: listas" if exceptions_loaded else "Excepciones: pendientes",
+            "ok" if exceptions_loaded else "warn",
+        )
+        if is_running:
+            run_text = "Ejecucion: en proceso"
+            run_level = "working"
+        elif has_output:
+            run_text = "Ejecucion: completada"
+            run_level = "ok"
+        else:
+            run_text = "Ejecucion: sin iniciar"
+            run_level = "neutral"
+        self._set_chip_state(self.health_chip_run, run_text, run_level)
+
+    def _refresh_page_titles(self, page: str | None = None) -> None:
+        active_page = page or self.current_page
+        if active_page == "report":
+            self.nav_title.configure(text="Hikvision Hours · Reporte")
+            if self.report_hero_title is not None:
+                self.report_hero_title.configure(text="Centro de Operaciones")
+            if self.report_hero_subtitle is not None:
+                self.report_hero_subtitle.configure(
+                    text="Bitacora en vivo del procesamiento, validaciones y reporte final."
+                )
+        else:
+            self.nav_title.configure(text="Hikvision Hours · Excepciones")
+            if self.report_hero_title is not None:
+                self.report_hero_title.configure(text="Centro de Operaciones")
+            if self.report_hero_subtitle is not None:
+                self.report_hero_subtitle.configure(
+                    text="Bitacora en vivo del procesamiento, validaciones y reporte final."
+                )
+
+    def _apply_tab_visual_state(self, page: str) -> None:
+        active_tab_fg = COLOR_TAB_ACTIVE
+        inactive_tab_fg = "transparent"
+        active_text = COLOR_TAB_TEXT_ACTIVE
+        inactive_text = COLOR_TEXT_MUTED
+        active_line = COLOR_PRIMARY
+        hidden_line = ("#DCE8F6", "#0E1A2B")
+
+        if page == "report":
+            self.report_tab_button.configure(fg_color=active_tab_fg, text_color=active_text)
+            self.exceptions_tab_button.configure(fg_color=inactive_tab_fg, text_color=inactive_text)
+            self.report_indicator.configure(fg_color=active_line)
+            self.exceptions_indicator.configure(fg_color=hidden_line)
+        else:
+            self.exceptions_tab_button.configure(fg_color=active_tab_fg, text_color=active_text)
+            self.report_tab_button.configure(fg_color=inactive_tab_fg, text_color=inactive_text)
+            self.exceptions_indicator.configure(fg_color=active_line)
+            self.report_indicator.configure(fg_color=hidden_line)
+
+    def _finish_page_transition(self, target_page: str, outgoing_page: str) -> None:
+        target_frame = self._page_frames[target_page]
+        outgoing_frame = self._page_frames[outgoing_page]
+        target_frame.place_configure(x=0, y=0, relwidth=1, relheight=1)
+        outgoing_frame.place_configure(x=0, y=0, relwidth=1, relheight=1)
+        target_frame.lift()
+        outgoing_frame.lower()
+        self.current_page = target_page
+        self._page_transition_running = False
+        self._page_transition_after = None
+        self._refresh_page_titles(target_page)
+
+        if self._pending_page and self._pending_page != self.current_page:
+            pending = self._pending_page
+            self._pending_page = None
+            self._show_page(pending, animate=True)
+        else:
+            self._pending_page = None
+
+    def _ease_in_out_cubic(self, t: float) -> float:
+        if t <= 0:
+            return 0.0
+        if t >= 1:
+            return 1.0
+        if t < 0.5:
+            return 4 * t * t * t
+        return 1 - pow(-2 * t + 2, 3) / 2
+
+    def _ease_out_cubic(self, t: float) -> float:
+        if t <= 0:
+            return 0.0
+        if t >= 1:
+            return 1.0
+        return 1 - pow(1 - t, 3)
+
+    def _animate_page_switch(self, target_page: str) -> None:
+        if target_page not in self._page_frames:
+            return
+
+        if self._page_transition_running:
+            self._pending_page = target_page
+            return
+
+        outgoing_page = self.current_page
+        if outgoing_page == target_page:
+            return
+        if outgoing_page not in self._page_frames:
+            self.current_page = target_page
+            self._page_frames[target_page].lift()
+            self._refresh_page_titles(target_page)
+            return
+
+        self._page_transition_running = True
+        self._pending_page = None
+        self._apply_tab_visual_state(target_page)
+        self._refresh_page_titles(target_page)
+
+        outgoing_frame = self._page_frames[outgoing_page]
+        target_frame = self._page_frames[target_page]
+
+        self.update_idletasks()
+        width = max(1, self.content.winfo_width())
+        direction = 1 if target_page == "exceptions" else -1
+        steps = 24
+        delay_ms = 11
+        settle_steps = 6
+        settle_px = 12
+
+        start_out = 0
+        end_out = -direction * max(140, int(width * 0.20))
+        start_in = direction * max(220, int(width * 0.38))
+        end_in = 0
+
+        outgoing_frame.place_configure(x=start_out, y=0, relwidth=1, relheight=1)
+        target_frame.place_configure(x=start_in, y=0, relwidth=1, relheight=1)
+        target_frame.lift()
+
+        if self._page_transition_after is not None:
+            self.after_cancel(self._page_transition_after)
+            self._page_transition_after = None
+
+        def _step(index: int) -> None:
+            t = index / steps
+            eased = self._ease_in_out_cubic(t)
+            out_x = round(start_out + (end_out - start_out) * eased)
+            in_x = round(start_in + (end_in - start_in) * eased)
+
+            outgoing_frame.place_configure(x=out_x, y=0, relwidth=1, relheight=1)
+            target_frame.place_configure(x=in_x, y=0, relwidth=1, relheight=1)
+
+            if index < steps:
+                self._page_transition_after = self.after(delay_ms, lambda: _step(index + 1))
+                return
+
+            overshoot = -direction * settle_px
+            target_frame.place_configure(x=overshoot, y=0, relwidth=1, relheight=1)
+
+            def _settle(step_idx: int) -> None:
+                tt = step_idx / settle_steps
+                settle_eased = self._ease_out_cubic(tt)
+                x = round(overshoot * (1 - settle_eased))
+                target_frame.place_configure(x=x, y=0, relwidth=1, relheight=1)
+                if step_idx < settle_steps:
+                    self._page_transition_after = self.after(delay_ms, lambda: _settle(step_idx + 1))
+                else:
+                    self._finish_page_transition(target_page, outgoing_page)
+
+            _settle(0)
+
+        _step(0)
+
     def _minutes_to_hhmm(self, total_minutes: int) -> str:
         hours, minutes = divmod(max(0, int(total_minutes)), 60)
         return f"{hours:02d}:{minutes:02d}"
@@ -237,6 +467,50 @@ class HikvisionApp(ctk.CTk):
     def _set_kpi_value(self, label: ctk.CTkLabel | None, value: str) -> None:
         if label is not None:
             label.configure(text=value)
+
+    def _to_non_negative_int(self, value: object) -> int:
+        try:
+            return max(0, int(str(value).strip()))
+        except (TypeError, ValueError):
+            return 0
+
+    def _hhmm_to_minutes(self, value: str) -> int:
+        if ":" not in value:
+            return 0
+        try:
+            hours, minutes = value.split(":", 1)
+            return max(0, int(hours) * 60 + int(minutes))
+        except ValueError:
+            return 0
+
+    def _set_kpi_card_style(self, key: str, variant: str) -> None:
+        card_data = self._kpi_cards.get(key)
+        if not card_data:
+            return
+
+        palette = {
+            "neutral": COLOR_KPI_NEUTRAL,
+            "positive": COLOR_KPI_POSITIVE,
+            "warning": COLOR_KPI_WARNING,
+            "alert": COLOR_KPI_ALERT,
+        }
+        color_pair = palette.get(variant, COLOR_KPI_NEUTRAL)
+        accent = card_data.get("accent")
+        if isinstance(accent, ctk.CTkFrame):
+            accent.configure(fg_color=color_pair)
+
+    def _refresh_kpi_visual_state(self) -> None:
+        employees_count = self._to_non_negative_int(self.kpi_employees_value.cget("text")) if self.kpi_employees_value else 0
+        days_count = self._to_non_negative_int(self.kpi_days_value.cget("text")) if self.kpi_days_value else 0
+        late_count = self._to_non_negative_int(self.kpi_late_value.cget("text")) if self.kpi_late_value else 0
+        absent_count = self._to_non_negative_int(self.kpi_absent_value.cget("text")) if self.kpi_absent_value else 0
+        overtime_minutes = self._hhmm_to_minutes(self.kpi_overtime_value.cget("text")) if self.kpi_overtime_value else 0
+
+        self._set_kpi_card_style("employees", "positive" if employees_count > 0 else "neutral")
+        self._set_kpi_card_style("days", "positive" if days_count > 0 else "neutral")
+        self._set_kpi_card_style("late", "warning" if late_count > 0 else "positive")
+        self._set_kpi_card_style("absent", "alert" if absent_count > 0 else "positive")
+        self._set_kpi_card_style("overtime", "neutral" if overtime_minutes <= 0 else "warning")
 
     def _marker_is_positive(self, value: object) -> bool:
         text = str(value).strip()
@@ -255,12 +529,25 @@ class HikvisionApp(ctk.CTk):
         except ValueError:
             return True
 
+    def _log_level_for_message(self, message: str) -> str:
+        lowered = message.strip().lower()
+        if not lowered:
+            return "info"
+        if any(token in lowered for token in ["error", "fallo", "invalido", "no se pudo"]):
+            return "error"
+        if any(token in lowered for token in ["warning", "atencion", "ausente", "tarde"]):
+            return "warn"
+        if any(token in lowered for token in ["completado", "generado", "guardada", "listo"]):
+            return "success"
+        return "info"
+
     def _reset_kpis(self) -> None:
         self._set_kpi_value(self.kpi_employees_value, "-")
         self._set_kpi_value(self.kpi_days_value, "-")
         self._set_kpi_value(self.kpi_late_value, "-")
         self._set_kpi_value(self.kpi_absent_value, "-")
         self._set_kpi_value(self.kpi_overtime_value, "-")
+        self._refresh_kpi_visual_state()
 
     def _refresh_kpis_from_daily_df(self, daily_df: pd.DataFrame) -> None:
         if daily_df.empty:
@@ -283,6 +570,7 @@ class HikvisionApp(ctk.CTk):
         self._set_kpi_value(self.kpi_late_value, str(late_count))
         self._set_kpi_value(self.kpi_absent_value, str(absent_count))
         self._set_kpi_value(self.kpi_overtime_value, self._minutes_to_hhmm(int(overtime_minutes)))
+        self._refresh_kpi_visual_state()
 
     def _refresh_kpis_from_source(self, source_path: Path) -> None:
         try:
@@ -305,6 +593,7 @@ class HikvisionApp(ctk.CTk):
         self._set_kpi_value(self.kpi_late_value, str(late_count))
         self._set_kpi_value(self.kpi_absent_value, str(absent_count))
         self._set_kpi_value(self.kpi_overtime_value, "--:--")
+        self._refresh_kpi_visual_state()
 
     def _refresh_kpis_from_output(self, output_path: Path) -> None:
         try:
@@ -324,6 +613,7 @@ class HikvisionApp(ctk.CTk):
         self._set_context_value(self.context_exceptions_value, exc_value)
         self._set_context_value(self.context_manual_value, manual_value)
         self._set_context_value(self.context_output_value, output_value)
+        self._refresh_health_chips()
 
     def _start_status_pulse(self) -> None:
         if self._status_pulse_job is not None:
@@ -542,28 +832,66 @@ class HikvisionApp(ctk.CTk):
         main.grid_columnconfigure(0, weight=1)
         main.grid_rowconfigure(4, weight=1)
 
-        header = ctk.CTkLabel(
+        hero = ctk.CTkFrame(
             main,
-            text="Bitacora de ejecucion",
+            corner_radius=12,
+            border_width=1,
+            border_color=COLOR_BORDER,
+            fg_color=COLOR_PANEL_SOFT,
+        )
+        hero.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        hero.grid_columnconfigure(0, weight=1)
+        hero.grid_rowconfigure(2, weight=0)
+
+        hero_accent = ctk.CTkFrame(hero, corner_radius=8, height=6, fg_color=COLOR_PRIMARY)
+        hero_accent.grid(row=0, column=0, sticky="ew", padx=12, pady=(10, 0))
+
+        self.report_hero_title = ctk.CTkLabel(
+            hero,
+            text="Centro de Operaciones",
             font=self.font_section,
             text_color=COLOR_TEXT,
         )
-        header.grid(row=0, column=0, sticky="w", pady=(2, 6))
+        self.report_hero_title.grid(row=1, column=0, sticky="w", padx=12, pady=(8, 2))
 
-        helper = ctk.CTkLabel(
-            main,
-            text="Aca vas a ver cada paso del procesamiento y errores detectados.",
+        self.report_hero_subtitle = ctk.CTkLabel(
+            hero,
+            text="Bitacora en vivo del procesamiento, validaciones y reporte final.",
             text_color=COLOR_TEXT_MUTED,
             font=self.font_subtitle,
         )
-        helper.grid(row=1, column=0, sticky="w", pady=(0, 8))
+        self.report_hero_subtitle.grid(row=2, column=0, sticky="w", padx=12, pady=(0, 8))
+
+        health_row = ctk.CTkFrame(hero, fg_color="transparent")
+        health_row.grid(row=3, column=0, sticky="ew", padx=12, pady=(0, 10))
+        health_row.grid_columnconfigure((0, 1, 2), weight=1)
+
+        def _build_chip(parent: ctk.CTkFrame, text: str) -> ctk.CTkLabel:
+            chip = ctk.CTkLabel(
+                parent,
+                text=text,
+                corner_radius=8,
+                fg_color=COLOR_CHIP_NEUTRAL_BG,
+                text_color=COLOR_CHIP_NEUTRAL_TEXT,
+                padx=8,
+                pady=5,
+                font=self.font_body,
+            )
+            return chip
+
+        self.health_chip_file = _build_chip(health_row, "Archivo: pendiente")
+        self.health_chip_file.grid(row=0, column=0, padx=(0, 6), sticky="ew")
+        self.health_chip_exceptions = _build_chip(health_row, "Excepciones: pendientes")
+        self.health_chip_exceptions.grid(row=0, column=1, padx=6, sticky="ew")
+        self.health_chip_run = _build_chip(health_row, "Ejecucion: sin iniciar")
+        self.health_chip_run.grid(row=0, column=2, padx=(6, 0), sticky="ew")
 
         kpi_grid = ctk.CTkFrame(main, fg_color="transparent")
-        kpi_grid.grid(row=2, column=0, sticky="ew", pady=(0, 10))
+        kpi_grid.grid(row=1, column=0, sticky="ew", pady=(0, 10))
         for idx in range(5):
             kpi_grid.grid_columnconfigure(idx, weight=1)
 
-        def _add_kpi(col: int, title: str) -> ctk.CTkLabel:
+        def _add_kpi(col: int, title: str, key: str) -> ctk.CTkLabel:
             card = ctk.CTkFrame(
                 kpi_grid,
                 corner_radius=12,
@@ -572,18 +900,26 @@ class HikvisionApp(ctk.CTk):
                 fg_color=COLOR_PANEL_SOFT,
             )
             card.grid(row=0, column=col, padx=(0 if col == 0 else 6, 0), sticky="ew")
-            ctk.CTkLabel(card, text=title, text_color=COLOR_TEXT_MUTED, font=self.font_body).pack(
-                anchor="w", padx=10, pady=(8, 0)
+            accent = ctk.CTkFrame(card, corner_radius=8, height=6, fg_color=COLOR_KPI_NEUTRAL)
+            accent.pack(fill="x", padx=10, pady=(8, 4))
+            ctk.CTkLabel(card, text=title.upper(), text_color=COLOR_TEXT_MUTED, font=self.font_body).pack(
+                anchor="w", padx=10, pady=(0, 0)
             )
-            value = ctk.CTkLabel(card, text="-", text_color=COLOR_TEXT, font=ctk.CTkFont(family="Bahnschrift", size=22, weight="bold"))
+            value = ctk.CTkLabel(
+                card,
+                text="-",
+                text_color=COLOR_TEXT,
+                font=ctk.CTkFont(family="Bahnschrift", size=22, weight="bold"),
+            )
             value.pack(anchor="w", padx=10, pady=(2, 10))
+            self._kpi_cards[key] = {"card": card, "accent": accent, "value": value}
             return value
 
-        self.kpi_employees_value = _add_kpi(0, "Empleados")
-        self.kpi_days_value = _add_kpi(1, "Jornadas")
-        self.kpi_late_value = _add_kpi(2, "Tardanzas")
-        self.kpi_absent_value = _add_kpi(3, "Ausencias")
-        self.kpi_overtime_value = _add_kpi(4, "Horas Extra")
+        self.kpi_employees_value = _add_kpi(0, "Empleados", "employees")
+        self.kpi_days_value = _add_kpi(1, "Jornadas", "days")
+        self.kpi_late_value = _add_kpi(2, "Tardanzas", "late")
+        self.kpi_absent_value = _add_kpi(3, "Ausencias", "absent")
+        self.kpi_overtime_value = _add_kpi(4, "Horas Extra", "overtime")
 
         context_card = ctk.CTkFrame(
             main,
@@ -592,7 +928,7 @@ class HikvisionApp(ctk.CTk):
             border_color=COLOR_BORDER,
             fg_color=COLOR_PANEL_SOFT,
         )
-        context_card.grid(row=3, column=0, sticky="ew", pady=(0, 10))
+        context_card.grid(row=2, column=0, sticky="ew", pady=(0, 10))
         context_card.grid_columnconfigure(1, weight=1)
 
         ctk.CTkLabel(context_card, text="Archivo:", text_color=COLOR_TEXT_MUTED, font=self.font_body).grid(
@@ -622,7 +958,14 @@ class HikvisionApp(ctk.CTk):
         self.log_box = ctk.CTkTextbox(main, corner_radius=10, border_width=1)
         self.log_box.configure(border_color=COLOR_BORDER, fg_color=COLOR_PANEL_SOFT, text_color=COLOR_TEXT, font=self.font_mono)
         self.log_box.grid(row=4, column=0, sticky="nsew")
-        self.log_box.insert("end", "Listo para procesar fichadas.\n")
+        self._log_text_widget = getattr(self.log_box, "_textbox", None)
+        if isinstance(self._log_text_widget, tk.Text):
+            self._log_text_widget.tag_config("info", foreground=self._theme_color(COLOR_LOG_INFO))
+            self._log_text_widget.tag_config("success", foreground=self._theme_color(COLOR_LOG_SUCCESS))
+            self._log_text_widget.tag_config("warn", foreground=self._theme_color(COLOR_LOG_WARN))
+            self._log_text_widget.tag_config("error", foreground=self._theme_color(COLOR_LOG_ERROR))
+            self._log_text_widget.tag_config("time", foreground=self._theme_color(COLOR_TEXT_MUTED))
+        self.log("Listo para procesar fichadas.")
         self.log_box.configure(state="disabled")
 
         watermark = ctk.CTkLabel(
@@ -879,26 +1222,31 @@ class HikvisionApp(ctk.CTk):
             fg_color=COLOR_PANEL_SOFT,
         )
         legend_card.grid(row=3, column=0, sticky="ew", pady=(0, 10))
-        legend_card.grid_columnconfigure((0, 1, 2), weight=1)
+        legend_card.grid_columnconfigure((0, 1, 2, 3), weight=1)
 
         ctk.CTkLabel(
             legend_card,
             text="Leyenda Rapida de Estados",
             font=self.font_button,
             text_color=COLOR_TEXT,
-        ).grid(row=0, column=0, columnspan=3, padx=12, pady=(8, 6), sticky="w")
+        ).grid(row=0, column=0, columnspan=4, padx=12, pady=(8, 6), sticky="w")
 
         legend_items = [
-            ("Feriado", "#A9DF8F"),
-            ("Vacaciones", "#FFF59D"),
-            ("Ausente", "#EF9A9A"),
-            ("Tardanza", "#2E7D32"),
             ("Domingo", "#D9D9D9"),
+            ("Ausencia", "#EF9A9A"),
+            ("Vacaciones", "#FFF59D"),
+            ("Estudiar", "#B3E5FC"),
+            ("Capacitaciones", "#F8BBD0"),
+            ("Suspencion", "#90CAF9"),
+            ("No trabajado", "#D7CCC8"),
             ("Licencia", "#FFCC80"),
+            ("Feriado", "#A9DF8F"),
+            ("Accidente", "#CE93D8"),
+            ("Tardanza", "#2E7D32"),
         ]
         for idx, (name, color) in enumerate(legend_items):
-            row = 1 + (idx // 3)
-            col = idx % 3
+            row = 1 + (idx // 4)
+            col = idx % 4
             chip = ctk.CTkFrame(legend_card, corner_radius=8, fg_color=color)
             chip.grid(row=row, column=col, padx=8, pady=6, sticky="ew")
             ctk.CTkLabel(
@@ -933,27 +1281,34 @@ class HikvisionApp(ctk.CTk):
 
         return page
 
-    def _show_page(self, page: str) -> None:
-        self.current_page = page
-        active_tab_fg = COLOR_TAB_ACTIVE
-        inactive_tab_fg = "transparent"
-        active_text = COLOR_TAB_TEXT_ACTIVE
-        inactive_text = COLOR_TEXT_MUTED
-        active_line = COLOR_PRIMARY
-        hidden_line = ("#DCE8F6", "#0E1A2B")
+    def _show_page(self, page: str, *, animate: bool = True) -> None:
+        if page not in self._page_frames:
+            return
 
-        if page == "report":
-            self.report_page.tkraise()
-            self.report_tab_button.configure(fg_color=active_tab_fg, text_color=active_text)
-            self.exceptions_tab_button.configure(fg_color=inactive_tab_fg, text_color=inactive_text)
-            self.report_indicator.configure(fg_color=active_line)
-            self.exceptions_indicator.configure(fg_color=hidden_line)
-        else:
-            self.exceptions_page.tkraise()
-            self.exceptions_tab_button.configure(fg_color=active_tab_fg, text_color=active_text)
-            self.report_tab_button.configure(fg_color=inactive_tab_fg, text_color=inactive_text)
-            self.exceptions_indicator.configure(fg_color=active_line)
-            self.report_indicator.configure(fg_color=hidden_line)
+        if page == self.current_page and not self._page_transition_running:
+            self._apply_tab_visual_state(page)
+            self._refresh_page_titles(page)
+            return
+
+        if not animate:
+            if self._page_transition_after is not None:
+                self.after_cancel(self._page_transition_after)
+                self._page_transition_after = None
+            self._page_transition_running = False
+            self._pending_page = None
+            target_frame = self._page_frames[page]
+            for name, frame in self._page_frames.items():
+                frame.place_configure(x=0, y=0, relwidth=1, relheight=1)
+                if name == page:
+                    frame.lift()
+                else:
+                    frame.lower()
+            self.current_page = page
+            self._apply_tab_visual_state(page)
+            self._refresh_page_titles(page)
+            return
+
+        self._animate_page_switch(page)
 
     def _set_status(self, text: str, level: str = "ready") -> None:
         palette = {
@@ -967,6 +1322,15 @@ class HikvisionApp(ctk.CTk):
             fg_color=colors["fg"],
             text_color=colors["text"],
         )
+        if self.report_hero_subtitle is not None:
+            self.report_hero_subtitle.configure(
+                text=f"Estado actual: {text}. Bitacora en vivo del procesamiento y validaciones."
+            )
+
+        run_level_map = {"ready": "ok", "working": "working", "error": "error"}
+        run_level = run_level_map.get(level, "neutral")
+        self._set_chip_state(self.health_chip_run, f"Ejecucion: {text}", run_level)
+
         if level == "working":
             self._start_status_pulse()
         else:
@@ -1485,8 +1849,15 @@ class HikvisionApp(ctk.CTk):
     def log(self, message: str) -> None:
         if self.log_box is None:
             return
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        level = self._log_level_for_message(message)
+        line = f"[{timestamp}] {message}\n"
         self.log_box.configure(state="normal")
-        self.log_box.insert("end", f"{message}\n")
+        if isinstance(self._log_text_widget, tk.Text):
+            self._log_text_widget.insert("end", f"[{timestamp}] ", ("time",))
+            self._log_text_widget.insert("end", f"{message}\n", (level,))
+        else:
+            self.log_box.insert("end", line)
         self.log_box.see("end")
         self.log_box.configure(state="disabled")
 
@@ -1495,7 +1866,12 @@ class HikvisionApp(ctk.CTk):
             return
         self.log_box.configure(state="normal")
         self.log_box.delete("1.0", "end")
-        self.log_box.insert("end", "Bitacora limpia.\n")
+        if isinstance(self._log_text_widget, tk.Text):
+            now = datetime.now().strftime("%H:%M:%S")
+            self._log_text_widget.insert("end", f"[{now}] ", ("time",))
+            self._log_text_widget.insert("end", "Bitacora limpia.\n", ("info",))
+        else:
+            self.log_box.insert("end", f"[{datetime.now().strftime('%H:%M:%S')}] Bitacora limpia.\n")
         self.log_box.configure(state="disabled")
 
     def open_output_file(self) -> None:
