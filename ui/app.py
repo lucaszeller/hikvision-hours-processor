@@ -129,6 +129,9 @@ class HikvisionApp(ctk.CTk):
         self.health_chip_file: ctk.CTkLabel | None = None
         self.health_chip_exceptions: ctk.CTkLabel | None = None
         self.health_chip_run: ctk.CTkLabel | None = None
+        self.exceptions_chip_file: ctk.CTkLabel | None = None
+        self.exceptions_chip_manual: ctk.CTkLabel | None = None
+        self.exceptions_chip_save: ctk.CTkLabel | None = None
         self._log_text_widget: tk.Text | None = None
         self._page_frames: dict[str, ctk.CTkFrame] = {}
         self._page_transition_after: str | None = None
@@ -310,6 +313,32 @@ class HikvisionApp(ctk.CTk):
             run_text = "Ejecucion: sin iniciar"
             run_level = "neutral"
         self._set_chip_state(self.health_chip_run, run_text, run_level)
+        self._refresh_exceptions_hero_chips()
+
+    def _refresh_exceptions_hero_chips(self) -> None:
+        file_text = self.exceptions_file.name if self.exceptions_file else "sin archivo"
+        self._set_chip_state(
+            self.exceptions_chip_file,
+            f"Archivo: {file_text}",
+            "ok" if self.exceptions_file is not None else "warn",
+        )
+
+        manual_text = self.exceptions_manual_box.get("1.0", "end").strip() if self.exceptions_manual_box else ""
+        manual_count = self._count_manual_exceptions(manual_text)
+        manual_level = "neutral" if manual_count == 0 else "working" if manual_count <= 5 else "warn"
+        self._set_chip_state(
+            self.exceptions_chip_manual,
+            f"Pendiente manual: {manual_count} lineas",
+            manual_level,
+        )
+
+        if self._worker_thread and self._worker_thread.is_alive():
+            save_text = "Guardado: bloqueado (procesando)"
+            save_level = "warn"
+        else:
+            save_text = "Guardado: disponible"
+            save_level = "ok"
+        self._set_chip_state(self.exceptions_chip_save, save_text, save_level)
 
     def _refresh_page_titles(self, page: str | None = None) -> None:
         active_page = page or self.current_page
@@ -1038,7 +1067,7 @@ class HikvisionApp(ctk.CTk):
 
         self.clear_exceptions_button = ctk.CTkButton(
             sidebar,
-            text="Usar archivo por defecto",
+            text="Restaurar archivo por defecto",
             height=34,
             command=self.clear_exceptions_file,
         )
@@ -1083,26 +1112,62 @@ class HikvisionApp(ctk.CTk):
         main.grid_columnconfigure(0, weight=1)
         main.grid_rowconfigure(4, weight=1)
 
-        header = ctk.CTkLabel(
+        hero = ctk.CTkFrame(
             main,
-            text="Carga Manual",
+            corner_radius=12,
+            border_width=1,
+            border_color=COLOR_BORDER,
+            fg_color=COLOR_PANEL_SOFT,
+        )
+        hero.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        hero.grid_columnconfigure(0, weight=1)
+
+        hero_accent = ctk.CTkFrame(hero, corner_radius=8, height=6, fg_color=COLOR_PRIMARY)
+        hero_accent.grid(row=0, column=0, sticky="ew", padx=12, pady=(10, 0))
+
+        header = ctk.CTkLabel(
+            hero,
+            text="Centro de Excepciones",
             font=self.font_section,
             text_color=COLOR_TEXT,
         )
-        header.grid(row=0, column=0, sticky="w", pady=(2, 6))
+        header.grid(row=1, column=0, sticky="w", padx=12, pady=(8, 2))
 
         helper = ctk.CTkLabel(
-            main,
+            hero,
             text=(
-                "Carga rapida por campos o pega varias lineas.\n"
-                "Soporta rango Fecha inicio/fin (ejemplo: vacaciones).\n"
-                "Formato manual: ID|YYYY-MM-DD|TIPO|DETALLE"
+                "Carga rapida por campos o pega varias lineas. "
+                "Rango inicio/fin ideal para vacaciones y licencias."
             ),
             justify="left",
             text_color=COLOR_TEXT_MUTED,
             font=self.font_subtitle,
         )
-        helper.grid(row=1, column=0, sticky="w", pady=(0, 8))
+        helper.grid(row=2, column=0, sticky="w", padx=12, pady=(0, 8))
+
+        hero_chips = ctk.CTkFrame(hero, fg_color="transparent")
+        hero_chips.grid(row=3, column=0, sticky="ew", padx=12, pady=(0, 10))
+        hero_chips.grid_columnconfigure((0, 1, 2), weight=1)
+
+        def _build_exceptions_chip(parent: ctk.CTkFrame, text: str) -> ctk.CTkLabel:
+            chip = ctk.CTkLabel(
+                parent,
+                text=text,
+                corner_radius=8,
+                fg_color=COLOR_CHIP_NEUTRAL_BG,
+                text_color=COLOR_CHIP_NEUTRAL_TEXT,
+                padx=8,
+                pady=5,
+                font=self.font_body,
+            )
+            return chip
+
+        self.exceptions_chip_file = _build_exceptions_chip(hero_chips, "Archivo: sin archivo")
+        self.exceptions_chip_file.grid(row=0, column=0, padx=(0, 6), sticky="ew")
+        self.exceptions_chip_manual = _build_exceptions_chip(hero_chips, "Pendiente manual: 0 lineas")
+        self.exceptions_chip_manual.grid(row=0, column=1, padx=6, sticky="ew")
+        self.exceptions_chip_save = _build_exceptions_chip(hero_chips, "Guardado: disponible")
+        self.exceptions_chip_save.grid(row=0, column=2, padx=(6, 0), sticky="ew")
 
         quick_card = ctk.CTkFrame(
             main,
@@ -1386,6 +1451,7 @@ class HikvisionApp(ctk.CTk):
 
         self.report_tab_button.configure(state="normal" if enabled else "disabled")
         self.exceptions_tab_button.configure(state="normal" if enabled else "disabled")
+        self._refresh_exceptions_hero_chips()
 
     def _set_progress(self, percent: int, step_text: str) -> None:
         bounded = max(0, min(100, int(percent)))
