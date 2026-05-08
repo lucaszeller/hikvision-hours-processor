@@ -91,6 +91,8 @@ class HikvisionApp(ctk.CTk):
         self.quick_remove_last_button: ctk.CTkButton | None = None
         self.quick_clear_manual_button: ctk.CTkButton | None = None
         self.exceptions_summary_label: ctk.CTkLabel | None = None
+        self.open_date_button_report: ctk.CTkButton | None = None
+        self.open_date_button_exceptions: ctk.CTkButton | None = None
         self.context_file_value: ctk.CTkLabel | None = None
         self.context_exceptions_value: ctk.CTkLabel | None = None
         self.context_manual_value: ctk.CTkLabel | None = None
@@ -454,6 +456,15 @@ class HikvisionApp(ctk.CTk):
         self._style_primary_button(self.select_button, height=38)
         self.select_button.grid(row=6, column=0, padx=20, pady=(0, 10), sticky="ew")
 
+        self.open_date_button_report = ctk.CTkButton(
+            sidebar,
+            text="Abrir date.xlsx",
+            height=34,
+            command=self.open_date_template_file,
+        )
+        self._style_secondary_button(self.open_date_button_report, height=34)
+        self.open_date_button_report.grid(row=7, column=0, padx=20, pady=(0, 8), sticky="ew")
+
         self.exceptions_summary_label = ctk.CTkLabel(
             sidebar,
             text="Excepciones: sin configurar",
@@ -461,16 +472,7 @@ class HikvisionApp(ctk.CTk):
             text_color=COLOR_TEXT_MUTED,
             font=self.font_body,
         )
-        self.exceptions_summary_label.grid(row=7, column=0, padx=20, pady=(0, 8), sticky="w")
-
-        goto_exceptions = ctk.CTkButton(
-            sidebar,
-            text="Ir a Excepciones",
-            height=34,
-            command=lambda: self._show_page("exceptions"),
-        )
-        self._style_secondary_button(goto_exceptions, height=34)
-        goto_exceptions.grid(row=8, column=0, padx=20, pady=(0, 10), sticky="ew")
+        self.exceptions_summary_label.grid(row=8, column=0, padx=20, pady=(0, 8), sticky="w")
 
         self.process_button = ctk.CTkButton(
             sidebar,
@@ -709,14 +711,14 @@ class HikvisionApp(ctk.CTk):
         self._style_primary_button(self.save_exceptions_button, height=36)
         self.save_exceptions_button.grid(row=6, column=0, padx=20, pady=(6, 8), sticky="ew")
 
-        go_report = ctk.CTkButton(
+        self.open_date_button_exceptions = ctk.CTkButton(
             sidebar,
-            text="Volver a Reporte",
+            text="Abrir date.xlsx",
             height=34,
-            command=lambda: self._show_page("report"),
+            command=self.open_date_template_file,
         )
-        self._style_secondary_button(go_report, height=34)
-        go_report.grid(row=7, column=0, padx=20, pady=(0, 8), sticky="ew")
+        self._style_secondary_button(self.open_date_button_exceptions, height=34)
+        self.open_date_button_exceptions.grid(row=7, column=0, padx=20, pady=(0, 8), sticky="ew")
 
         info = ctk.CTkLabel(
             sidebar,
@@ -1013,6 +1015,10 @@ class HikvisionApp(ctk.CTk):
             self.quick_remove_last_button.configure(state="normal" if enabled else "disabled")
         if self.quick_clear_manual_button is not None:
             self.quick_clear_manual_button.configure(state="normal" if enabled else "disabled")
+        if self.open_date_button_report is not None:
+            self.open_date_button_report.configure(state="normal" if enabled else "disabled")
+        if self.open_date_button_exceptions is not None:
+            self.open_date_button_exceptions.configure(state="normal" if enabled else "disabled")
 
         self.report_tab_button.configure(state="normal" if enabled else "disabled")
         self.exceptions_tab_button.configure(state="normal" if enabled else "disabled")
@@ -1499,6 +1505,20 @@ class HikvisionApp(ctk.CTk):
             os.startfile(self.output_file)
         except Exception as exc:
             messagebox.showerror("Error", f"No se pudo abrir el archivo:\n{exc}")
+
+    def open_date_template_file(self) -> None:
+        date_path = Path(__file__).resolve().parent.parent / "date.xlsx"
+        if not date_path.exists():
+            messagebox.showwarning(
+                "Archivo no encontrado",
+                f"No se encontro date.xlsx en:\n{date_path}",
+            )
+            return
+        try:
+            os.startfile(date_path)
+            self.log(f"Abriendo plantilla: {date_path.name}")
+        except Exception as exc:
+            messagebox.showerror("Error", f"No se pudo abrir date.xlsx:\n{exc}")
 
     def select_file(self) -> None:
         filepath = filedialog.askopenfilename(

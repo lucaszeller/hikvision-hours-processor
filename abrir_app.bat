@@ -2,11 +2,18 @@
 setlocal
 cd /d "%~dp0"
 
-if exist "venv\Scripts\python.exe" (
-    "venv\Scripts\python.exe" "main.py"
-) else (
-    python "main.py"
+if exist "venv\Scripts\pythonw.exe" (
+    start "" "venv\Scripts\pythonw.exe" "main.py"
+    goto :eof
 )
 
-if errorlevel 1 pause
-endlocal
+if exist "venv\Scripts\python.exe" (
+    start "" "venv\Scripts\python.exe" "main.py"
+) else (
+    where pythonw >nul 2>nul
+    if not errorlevel 1 (
+        start "" pythonw "main.py"
+    ) else (
+        start "" python "main.py"
+    )
+)
