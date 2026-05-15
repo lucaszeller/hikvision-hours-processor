@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime
+import re
 
 import pandas as pd
 
@@ -92,6 +93,16 @@ def _parse_time(value: object) -> datetime | None:
         return None
 
     text = str(value).strip()
+
+    # Soporta formatos mixtos como "07.31.00", "07:31 hs", etc.
+    match = re.search(r"(\d{1,2})[:.](\d{2})(?:[:.](\d{2}))?", text)
+    if match:
+        hh = int(match.group(1))
+        mm = int(match.group(2))
+        ss = int(match.group(3) or 0)
+        if 0 <= hh <= 23 and 0 <= mm <= 59 and 0 <= ss <= 59:
+            return datetime(1900, 1, 1, hh, mm, ss)
+
     formats = ["%H:%M:%S", "%H:%M"]
     for fmt in formats:
         try:
@@ -143,6 +154,7 @@ def process_punches(
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     valid_segments: list[dict] = []
     inconsistencies: list[dict] = []
+    partial_day_punches: dict[tuple[str, str, date], dict[str, object]] = {}
     day_flags: dict[tuple[str, str, date], dict[str, object]] = {}
     employee_name_by_id: dict[str, str] = {}
     departments_by_id: dict[str, set[str]] = {}
@@ -250,7 +262,14 @@ def process_punches(
                 and not row_exceptions
                 and not is_non_working_day
             )
-            day_state["absent"] = bool(day_state["absent"]) or absent_marker or missing_both_without_exception
+            # El marcador "Ausente" de Hikvision puede venir en 1 aun con fichadas
+            # (por configuracion de iVMS/horario). Solo lo tomamos si no hay fichadas.
+            absent_marker_without_punches = absent_marker and not (has_entry or has_exit)
+            day_state["absent"] = (
+                bool(day_state["absent"])
+                or absent_marker_without_punches
+                or missing_both_without_exception
+            )
             for exc in row_exceptions:
                 exc_type = str(exc.exception_type).strip()
                 if exc_type and exc_type not in day_state["exception_types"]:
@@ -345,9 +364,24 @@ def process_punches(
             employee_id == ""
             or employee_name == ""
             or date_parsed is None
-            or entry_time is None
-            or exit_time is None
         ):
+            continue
+
+        day_key = (employee_id, employee_name, date_parsed.date())
+        partial_state = partial_day_punches.setdefault(
+            day_key,
+            {"entries": [], "exits": [], "departments": set(), "schedules": set()},
+        )
+        if department:
+            partial_state["departments"].add(department)
+        if schedule:
+            partial_state["schedules"].add(schedule)
+        if entry_time is not None:
+            partial_state["entries"].append(datetime.combine(date_parsed.date(), entry_time.time()))
+        if exit_time is not None:
+            partial_state["exits"].append(datetime.combine(date_parsed.date(), exit_time.time()))
+
+        if entry_time is None or exit_time is None:
             continue
 
         start_dt = datetime.combine(date_parsed.date(), entry_time.time())
@@ -391,6 +425,48 @@ def process_punches(
                 "rounded_minutes": rounded_minutes,
             }
         )
+
+    # Reconstruye jornada cuando Hikvision separa entrada/salida en filas distintas
+    # y no existe ningun tramo completo para ese empleado/dia.
+    existing_day_keys = {
+        (str(seg["employee_id"]), str(seg["employee_name"]), seg["work_date"])
+        for seg in valid_segments
+    }
+    for day_key, data in partial_day_punches.items():
+        if day_key in existing_day_keys:
+            continue
+        entries = list(data.get("entries", []))
+        exits = list(data.get("exits", []))
+        if not entries or not exits:
+            continue
+
+        start_dt = min(entries)
+        end_dt = max(exits)
+        if end_dt <= start_dt:
+            continue
+
+        employee_id, employee_name, work_date = day_key
+        department = " / ".join(sorted([d for d in data.get("departments", set()) if str(d).strip() != ""]))
+        schedule_value = " | ".join(sorted([s for s in data.get("schedules", set()) if str(s).strip() != ""]))
+        real_minutes = int(round((end_dt - start_dt).total_seconds() / 60))
+        rounded_minutes = _round_to_30(real_minutes)
+
+        valid_segments.append(
+            {
+                "employee_id": employee_id,
+                "employee_name": employee_name,
+                "department": department,
+                "work_date": work_date,
+                "entry_dt": start_dt,
+                "exit_dt": end_dt,
+                "schedule": schedule_value,
+                "real_minutes": real_minutes,
+                "rounded_minutes": rounded_minutes,
+            }
+        )
+
+        if day_key in day_flags:
+            day_flags[day_key]["absent"] = False
 
     # Asegura que excepciones (por ejemplo desde date.xlsx/Ausencias) aparezcan en Diario
     # aunque no exista fila/fichada de Hikvision para ese empleado y fecha.

@@ -303,3 +303,67 @@ def test_liquidar_uses_only_employees_from_date_xlsx_when_available(tmp_path: Pa
     headers = [ws.cell(row=1, column=col).value for col in range(1, ws.max_column + 1)]
     assert "20 Ana" in headers
     assert "30 Luis" not in headers
+
+
+def test_liquidar_adds_quincena_common_and_extra_totals(tmp_path: Path) -> None:
+    daily_df = pd.DataFrame(
+        {
+            "ID de persona": ["20", "20", "20"],
+            "Nombre": ["Ana", "Ana", "Ana"],
+                "Fecha": [
+                    pd.Timestamp("2026-05-05").date(),  # 1ra quincena
+                    pd.Timestamp("2026-05-18").date(),  # 2da quincena
+                    pd.Timestamp("2026-05-20").date(),  # 2da quincena
+                ],
+            "Departamento": ["A", "A", "A"],
+            "Estado": ["Normal", "Tardanza", "Normal"],
+            "Tramos trabajados": ["07:30 - 12:00", "07:30 - 17:30", "07:30 - 12:00"],
+            "Minutos reales": [270, 600, 270],
+            "Minutos redondeados": [270, 600, 270],
+            "Minutos extra": [30, 120, 0],
+            "Horas extra": ["00:30", "02:00", "00:00"],
+            "Horas totales": ["04:30", "10:00", "04:30"],
+        }
+    )
+    monthly_df = pd.DataFrame(
+        columns=[
+            "ID de persona",
+            "Nombre",
+            "Dias trabajados",
+            "Minutos totales",
+            "Minutos extra",
+            "Horas extra",
+            "Horas totales",
+        ]
+    )
+    inconsistencies_df = pd.DataFrame(
+        columns=["ID de persona", "Nombre", "Fecha", "Tipo de inconsistencia", "Detalle"]
+    )
+
+    output = tmp_path / "reporte_liquidar_quincena.xlsx"
+    export_report(output, daily_df, monthly_df, inconsistencies_df)
+
+    wb = load_workbook(output)
+    ws = wb["Liquidar"]
+
+    labels = {}
+    for row in range(2, ws.max_row + 1):
+        labels[str(ws.cell(row=row, column=2).value)] = row
+
+    # 1ra quincena: comunes=4.0h, extras=0.5h
+    r = labels["1ra Quincena - Horas Comunes"]
+    assert ws.cell(row=r, column=4).value == 4.0
+    r = labels["1ra Quincena - Horas Extras"]
+    assert ws.cell(row=r, column=4).value == 0.5
+
+    # 2da quincena: comunes=12.5h, extras=2.0h
+    r = labels["2da Quincena - Horas Comunes"]
+    assert ws.cell(row=r, column=4).value == 12.5
+    r = labels["2da Quincena - Horas Extras"]
+    assert ws.cell(row=r, column=4).value == 2.0
+
+    # Totales mes: comunes=16.5h, extras=2.5h
+    r = labels["Total Mes - Horas Comunes"]
+    assert ws.cell(row=r, column=4).value == 16.5
+    r = labels["Total Mes - Horas Extras"]
+    assert ws.cell(row=r, column=4).value == 2.5
