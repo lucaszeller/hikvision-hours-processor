@@ -248,20 +248,20 @@ def _load_employee_catalog(base_dir: Path) -> tuple[list[tuple[str, str, str]], 
 def _build_liquidar_sheet(
     daily_df: pd.DataFrame,
     base_dir: Path,
-) -> tuple[pd.DataFrame, dict[tuple[int, int], str], int]:
+) -> tuple[pd.DataFrame, dict[tuple[int, int], str]]:
     cols_base = ["Fecha", "Dia", "Dia #"]
     if daily_df.empty:
-        return pd.DataFrame(columns=cols_base), {}, 0
+        return pd.DataFrame(columns=cols_base), {}
 
     needed = {"Fecha", "ID de persona", "Nombre", "Minutos redondeados", "Minutos extra", "Estado"}
     if not needed.issubset(set(daily_df.columns)):
-        return pd.DataFrame(columns=cols_base), {}, 0
+        return pd.DataFrame(columns=cols_base), {}
 
     working = daily_df.copy()
     working["_fecha"] = pd.to_datetime(working["Fecha"], errors="coerce")
     working = working[working["_fecha"].notna()].copy()
     if working.empty:
-        return pd.DataFrame(columns=cols_base), {}, 0
+        return pd.DataFrame(columns=cols_base), {}
 
     def _clean_id(value: object) -> str:
         text = str(value).strip()
@@ -311,7 +311,10 @@ def _build_liquidar_sheet(
         }
         for emp_id, _, _ in employees
     }
-    for row_offset, day in enumerate(all_days, start=0):
+    excel_row = 2  # header is row 1
+
+    def _append_day_row(day: pd.Timestamp) -> None:
+        nonlocal excel_row
         row_data: dict[str, object] = {
             "Fecha": day.date(),
             "Dia": day_names[int(day.weekday())],
@@ -330,9 +333,10 @@ def _build_liquidar_sheet(
             totals_minutes_by_employee[emp_id][f"{half}_common"] += normal_minutes
             totals_minutes_by_employee[emp_id][f"{half}_extra"] += max(0, extra_minutes)
             status = str(rec.get("Estado", "")).strip()
-            # Excel row starts at 2 (header in row 1), and employee cols start after A,B,C
-            cell_status_map[(2 + row_offset, 4 + emp_index)] = status
+            # Employee cols start after A,B,C
+            cell_status_map[(excel_row, 4 + emp_index)] = status
         rows.append(row_data)
+        excel_row += 1
 
     def _hours(minutes: int) -> float:
         return round(max(0, int(minutes)) / 60, 2)
@@ -343,12 +347,24 @@ def _build_liquidar_sheet(
             row_data[emp_label] = _hours(totals_minutes_by_employee[emp_id][metric_key])
         return row_data
 
-    summary_rows = [
-        _summary_row("1ra Quincena - Horas Comunes", "q1_common"),
-        _summary_row("1ra Quincena - Horas Extras", "q1_extra"),
-        _summary_row("2da Quincena - Horas Comunes", "q2_common"),
-        _summary_row("2da Quincena - Horas Extras", "q2_extra"),
-    ]
+    q1_days = [day for day in all_days if int(day.day) <= 15]
+    q2_days = [day for day in all_days if int(day.day) > 15]
+
+    for day in q1_days:
+        _append_day_row(day)
+
+    if q1_days:
+        rows.append(_summary_row("1ra Quincena - Horas Comunes", "q1_common"))
+        rows.append(_summary_row("1ra Quincena - Horas Extras", "q1_extra"))
+        excel_row += 2
+
+    for day in q2_days:
+        _append_day_row(day)
+
+    if q2_days:
+        rows.append(_summary_row("2da Quincena - Horas Comunes", "q2_common"))
+        rows.append(_summary_row("2da Quincena - Horas Extras", "q2_extra"))
+        excel_row += 2
 
     total_common_row: dict[str, object] = {"Fecha": "", "Dia": "Total Mes - Horas Comunes", "Dia #": ""}
     total_extra_row: dict[str, object] = {"Fecha": "", "Dia": "Total Mes - Horas Extras", "Dia #": ""}
@@ -359,17 +375,15 @@ def _build_liquidar_sheet(
         total_extra_row[emp_label] = _hours(
             totals_minutes_by_employee[emp_id]["q1_extra"] + totals_minutes_by_employee[emp_id]["q2_extra"]
         )
-    summary_rows.extend([total_common_row, total_extra_row])
-    rows.extend(summary_rows)
+    rows.extend([total_common_row, total_extra_row])
 
     liquidar_df = pd.DataFrame(rows, columns=cols_base + employee_labels)
-    return liquidar_df, cell_status_map, len(all_days)
+    return liquidar_df, cell_status_map
 
 
 def _apply_liquidar_format(
     worksheet,
     status_cells: dict[tuple[int, int], str],
-    daily_rows_count: int,
 ) -> None:
     headers = [cell.value for cell in worksheet[1]]
     header_to_idx = {str(value): idx + 1 for idx, value in enumerate(headers) if value is not None}
@@ -392,7 +406,8 @@ def _apply_liquidar_format(
         worksheet.column_dimensions[get_column_letter(col_idx)].width = 17
 
     for row_idx in range(2, worksheet.max_row + 1):
-        is_daily_row = row_idx <= (1 + daily_rows_count)
+        first_col_value = worksheet.cell(row=row_idx, column=1).value
+        is_daily_row = pd.notna(pd.to_datetime(first_col_value, errors="coerce"))
         row_label = str(worksheet.cell(row=row_idx, column=2).value or "").strip().lower()
         for col_idx in range(1, worksheet.max_column + 1):
             cell = worksheet.cell(row=row_idx, column=col_idx)
@@ -493,7 +508,7 @@ def export_report(
     diario_export = _sort_for_report(daily_df.copy(), SHEET_LAYOUTS["Diario"]["priority_sort"])
     mensual_export = _sort_for_report(monthly_df.copy(), SHEET_LAYOUTS["Mensual"]["priority_sort"])
     resumen_estudio_export = _build_study_summary(diario_export)
-    liquidar_export, liquidar_status_cells, liquidar_daily_rows = _build_liquidar_sheet(
+    liquidar_export, liquidar_status_cells = _build_liquidar_sheet(
         diario_export,
         output.parent,
     )
@@ -507,11 +522,7 @@ def export_report(
             workbook = writer.book
             for sheet_name in ("Diario", "Mensual", "resumen-estudio"):
                 _apply_sheet_format(workbook[sheet_name], sheet_name)
-            _apply_liquidar_format(
-                workbook["Liquidar"],
-                liquidar_status_cells,
-                liquidar_daily_rows,
-            )
+            _apply_liquidar_format(workbook["Liquidar"], liquidar_status_cells)
 
         temp_output.replace(output)
     except Exception as exc:

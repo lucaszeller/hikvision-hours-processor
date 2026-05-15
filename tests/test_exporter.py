@@ -367,3 +367,17 @@ def test_liquidar_adds_quincena_common_and_extra_totals(tmp_path: Path) -> None:
     assert ws.cell(row=r, column=4).value == 16.5
     r = labels["Total Mes - Horas Extras"]
     assert ws.cell(row=r, column=4).value == 2.5
+
+    # Orden esperado: cierra 1ra quincena, luego siguen dias de 2da quincena.
+    row_q1_end = labels["1ra Quincena - Horas Extras"]
+    row_day_18 = None
+    row_day_20 = None
+    for row in range(2, ws.max_row + 1):
+        date_value = ws.cell(row=row, column=1).value
+        text = str(date_value)
+        if "2026-05-18" in text:
+            row_day_18 = row
+        if "2026-05-20" in text:
+            row_day_20 = row
+    assert row_day_18 is not None and row_day_18 > row_q1_end
+    assert row_day_20 is not None and row_day_20 > row_q1_end
