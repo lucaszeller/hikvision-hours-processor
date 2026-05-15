@@ -98,8 +98,77 @@ def _validate_daily_consistency(daily_df: pd.DataFrame) -> None:
             "Faltan columnas en hoja Diario para validacion: " + ", ".join(missing)
         )
 
+    normalized = daily_df.copy()
+    normalized["ID _key"] = normalized["ID de persona"].astype(str).str.strip()
+    normalized["Fecha _key"] = pd.to_datetime(normalized["Fecha"], errors="coerce")
+
+    invalid_dates = normalized[normalized["Fecha _key"].isna()]
+    if not invalid_dates.empty:
+        row_number = int(invalid_dates.index[0]) + 2
+        raise ValidationError(
+            f"Inconsistencia en Diario fila {row_number}: Fecha invalida '{invalid_dates.iloc[0]['Fecha']}'."
+        )
+
+    duplicate_mask = normalized.duplicated(subset=["ID _key", "Fecha _key"], keep=False)
+    if duplicate_mask.any():
+        duplicate_row = normalized.loc[duplicate_mask].iloc[0]
+        row_number = int(duplicate_row.name) + 2
+        raise ValidationError(
+            "Inconsistencia en Diario: filas duplicadas por empleado/fecha. "
+            f"Primera fila detectada: {row_number} "
+            f"(ID={duplicate_row['ID de persona']}, Fecha={pd.Timestamp(duplicate_row['Fecha _key']).date()})."
+        )
+
     for idx, row in daily_df.iterrows():
+        employee_id = str(row["ID de persona"]).strip()
+        employee_name = str(row["Nombre"]).strip()
+        status = str(row["Estado"]).strip()
+        segments = str(row["Tramos trabajados"]).strip()
+
+        if employee_id == "":
+            raise ValidationError(f"Inconsistencia en Diario fila {idx + 2}: ID de persona vacio.")
+        if employee_name == "":
+            raise ValidationError(f"Inconsistencia en Diario fila {idx + 2}: Nombre vacio.")
+
+        real_minutes = int(row["Minutos reales"])
         rounded_minutes = int(row["Minutos redondeados"])
+        extra_minutes = int(row["Minutos extra"])
+
+        if real_minutes < 0 or rounded_minutes < 0 or extra_minutes < 0:
+            raise ValidationError(
+                "Inconsistencia en Diario fila "
+                f"{idx + 2}: minutos negativos detectados "
+                f"(reales={real_minutes}, redondeados={rounded_minutes}, extra={extra_minutes})."
+            )
+
+        if rounded_minutes % 30 != 0:
+            raise ValidationError(
+                f"Inconsistencia en Diario fila {idx + 2}: Minutos redondeados={rounded_minutes} "
+                "no es multiplo de 30."
+            )
+
+        if extra_minutes > rounded_minutes:
+            raise ValidationError(
+                f"Inconsistencia en Diario fila {idx + 2}: Minutos extra={extra_minutes} "
+                f"no puede superar Minutos redondeados={rounded_minutes}."
+            )
+
+        if rounded_minutes == 0 and segments != "":
+            raise ValidationError(
+                "Inconsistencia en Diario fila "
+                f"{idx + 2}: hay tramos trabajados pero Minutos redondeados=0."
+            )
+
+        status_key = status.lower()
+        if status_key in {"ausente", "ausencia"} and (rounded_minutes > 0 or extra_minutes > 0):
+            raise ValidationError(
+                f"Inconsistencia en Diario fila {idx + 2}: Estado='{status}' no puede tener minutos trabajados."
+            )
+        if status_key == "tarde" and rounded_minutes <= 0:
+            raise ValidationError(
+                f"Inconsistencia en Diario fila {idx + 2}: Estado='Tarde' requiere minutos trabajados."
+            )
+
         hhmm_minutes = _hhmm_to_minutes(row["Horas totales"])
         if rounded_minutes != hhmm_minutes:
             raise ValidationError(
@@ -107,7 +176,6 @@ def _validate_daily_consistency(daily_df: pd.DataFrame) -> None:
                 f"{idx + 2}: Horas totales='{row['Horas totales']}' no coincide "
                 f"con Minutos redondeados={rounded_minutes}."
             )
-        extra_minutes = int(row["Minutos extra"])
         extra_hhmm = _hhmm_to_minutes(row["Horas extra"])
         if extra_minutes != extra_hhmm:
             raise ValidationError(
@@ -149,13 +217,24 @@ def _validate_monthly_consistency(daily_df: pd.DataFrame, monthly_df: pd.DataFra
             "Faltan columnas en Mensual para validacion: " + ", ".join(missing_monthly)
         )
 
+    monthly_normalized = monthly_df.copy()
+    monthly_normalized["ID _key"] = monthly_normalized["ID de persona"].astype(str).str.strip()
+    monthly_duplicates = monthly_normalized.duplicated(subset=["ID _key", "Nombre"], keep=False)
+    if monthly_duplicates.any():
+        duplicate_row = monthly_normalized.loc[monthly_duplicates].iloc[0]
+        raise ValidationError(
+            "Inconsistencia en Mensual: filas duplicadas por empleado. "
+            f"ID={duplicate_row['ID de persona']} Nombre={duplicate_row['Nombre']}."
+        )
+
     expected_monthly = (
         daily_df.groupby(["ID de persona", "Nombre"], as_index=False)
-        .agg({"Fecha": "nunique", "Minutos redondeados": "sum"})
+        .agg({"Fecha": "nunique", "Minutos redondeados": "sum", "Minutos extra": "sum"})
         .rename(
             columns={
                 "Fecha": "Dias esperados",
                 "Minutos redondeados": "Minutos esperados",
+                "Minutos extra": "Minutos extra esperados",
             }
         )
     )
@@ -173,15 +252,46 @@ def _validate_monthly_consistency(daily_df: pd.DataFrame, monthly_df: pd.DataFra
     for _, row in merged.iterrows():
         expected_minutes = int(row["Minutos esperados"])
         monthly_minutes = int(row["Minutos totales"])
+        monthly_extra = int(row["Minutos extra"])
+        expected_extra = int(row["Minutos extra esperados"])
+        monthly_days = int(row["Dias trabajados"])
+        expected_days = int(row["Dias esperados"])
+
+        if monthly_minutes < 0 or monthly_extra < 0:
+            raise ValidationError(
+                "Minutos negativos en Mensual para "
+                f"ID {row['ID de persona']} - {row['Nombre']}."
+            )
+        if monthly_days < 0:
+            raise ValidationError(
+                "Dias trabajados negativos en Mensual para "
+                f"ID {row['ID de persona']} - {row['Nombre']}."
+            )
+        if monthly_extra > monthly_minutes:
+            raise ValidationError(
+                "Horas extra inconsistentes en Mensual para "
+                f"ID {row['ID de persona']} - {row['Nombre']}: "
+                f"minutos extra={monthly_extra}, minutos totales={monthly_minutes}."
+            )
+        if monthly_minutes % 30 != 0 or monthly_extra % 30 != 0:
+            raise ValidationError(
+                "Minutos no redondeados en Mensual para "
+                f"ID {row['ID de persona']} - {row['Nombre']}."
+            )
+
         if expected_minutes != monthly_minutes:
             raise ValidationError(
                 "Inconsistencia mensual para "
                 f"ID {row['ID de persona']} - {row['Nombre']}: "
                 f"mensual={monthly_minutes}, esperado={expected_minutes}."
             )
+        if expected_extra != monthly_extra:
+            raise ValidationError(
+                "Inconsistencia de horas extra mensual para "
+                f"ID {row['ID de persona']} - {row['Nombre']}: "
+                f"mensual={monthly_extra}, esperado={expected_extra}."
+            )
 
-        expected_days = int(row["Dias esperados"])
-        monthly_days = int(row["Dias trabajados"])
         if expected_days != monthly_days:
             raise ValidationError(
                 "Dias trabajados inconsistentes para "
@@ -334,7 +444,31 @@ class ProcessorService:
 
         if progress_callback:
             progress_callback(72, "Validando consistencia de resultados...")
-        _validate_results(daily_df, monthly_df)
+        try:
+            _validate_results(daily_df, monthly_df)
+        except ValidationError as exc:
+            if strict_mode:
+                raise
+            validation_issue = pd.DataFrame(
+                [
+                    {
+                        "ID de persona": "",
+                        "Nombre": "",
+                        "Fecha": "",
+                        "Tipo de inconsistencia": "Validacion de reporte",
+                        "Detalle": str(exc),
+                    }
+                ]
+            )
+            inconsistencies_df = pd.concat(
+                [inconsistencies_df, validation_issue],
+                ignore_index=True,
+            )
+            if progress_callback:
+                progress_callback(
+                    76,
+                    "Se detectaron inconsistencias de validacion; se continua y se incluyen en el reporte.",
+                )
 
         if strict_mode:
             _validate_no_inconsistencies(inconsistencies_df)
