@@ -13,6 +13,9 @@ import customtkinter as ctk
 import pandas as pd
 import tkinter as tk
 from tkinter import filedialog, messagebox
+from openpyxl import load_workbook
+from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.datavalidation import DataValidation
 
 from services.exceptions import (
     ExceptionConfigError,
@@ -28,6 +31,19 @@ except Exception:  # pragma: no cover - optional dependency at runtime
     Calendar = None
 
 DEFAULT_EXCEPTIONS_FILENAME = "feriados_nacionales_argentina_2026.xlsx"
+DEFAULT_ABSENCE_TYPES = [
+    "DOMINGO",
+    "AUSENCIA",
+    "VACACIONES",
+    "ESTUDIAR",
+    "CAPACITACIONES",
+    "SUSPENCION",
+    "NO TRABAJADO",
+    "LICENCIA",
+    "FERIADO",
+    "ACCIDENTE DE TRABAJO",
+]
+DEFAULT_ABSENCE_STATES = ["PENDIENTE", "APROBADO", "RECHAZADO"]
 
 COLOR_BG = ("#EEF3F8", "#0A1220")
 COLOR_PANEL = ("#FFFFFF", "#111827")
@@ -139,11 +155,14 @@ class HikvisionApp(ctk.CTk):
         self._pending_page: str | None = None
         self._employee_selector_values: list[str] = ["Todos"]
         self._employee_label_to_id: dict[str, str] = {"Todos": ""}
+        self._absence_type_values: list[str] = list(DEFAULT_ABSENCE_TYPES)
         self._status_pulse_job: str | None = None
         self._status_pulse_on: bool = False
 
         self._build_ui()
         self._initialize_default_exceptions_file()
+        self._refresh_absence_type_options()
+        self._sync_absence_types_dropdown_in_template()
         self._refresh_employee_options()
 
     def _build_ui(self) -> None:
@@ -1236,7 +1255,7 @@ class HikvisionApp(ctk.CTk):
 
         self.quick_type_menu = ctk.CTkOptionMenu(
             quick_card,
-            values=["Feriado", "Vacaciones", "Enfermedad", "Permiso", "Ausencia justificada", "Otro"],
+            values=self._absence_type_values,
         )
         self.quick_type_menu.configure(
             fg_color=COLOR_PANEL,
@@ -1246,7 +1265,7 @@ class HikvisionApp(ctk.CTk):
             font=self.font_body,
         )
         self.quick_type_menu.grid(row=1, column=2, padx=6, pady=(0, 8), sticky="ew")
-        self.quick_type_menu.set("Feriado")
+        self.quick_type_menu.set(self._absence_type_values[0] if self._absence_type_values else "Feriado")
 
         self.quick_detail_entry = ctk.CTkEntry(quick_card, placeholder_text="Detalle (opcional)")
         self.quick_detail_entry.configure(border_color=COLOR_BORDER, fg_color=COLOR_PANEL, text_color=COLOR_TEXT)
@@ -1349,6 +1368,9 @@ class HikvisionApp(ctk.CTk):
     def _show_page(self, page: str, *, animate: bool = True) -> None:
         if page not in self._page_frames:
             return
+
+        if page == "exceptions":
+            self._refresh_absence_type_options()
 
         if page == self.current_page and not self._page_transition_running:
             self._apply_tab_visual_state(page)
@@ -1609,6 +1631,146 @@ class HikvisionApp(ctk.CTk):
 
         self._set_employee_selector_values(labels)
 
+    def _load_absence_types_from_template(self) -> list[str]:
+        root = Path(__file__).resolve().parent.parent
+        path = root / "date.xlsx"
+        if not path.exists():
+            return list(DEFAULT_ABSENCE_TYPES)
+        try:
+            with pd.ExcelFile(path) as excel:
+                sheet_map = {self._normalize_label(name): name for name in excel.sheet_names}
+            config_sheet = sheet_map.get(self._normalize_label("Config"))
+            if config_sheet is None:
+                return list(DEFAULT_ABSENCE_TYPES)
+            cfg = pd.read_excel(path, sheet_name=config_sheet)
+            if cfg.empty:
+                return list(DEFAULT_ABSENCE_TYPES)
+
+            columns = [str(col) for col in cfg.columns]
+            normalized = {self._normalize_label(col): col for col in columns}
+            col_name = normalized.get(self._normalize_label("Tipos de ausencia"))
+            if col_name is None:
+                for col in columns:
+                    if "tipo" in self._normalize_label(col) and "ausenc" in self._normalize_label(col):
+                        col_name = col
+                        break
+            if col_name is None:
+                return list(DEFAULT_ABSENCE_TYPES)
+
+            values: list[str] = []
+            seen: set[str] = set()
+            for raw in cfg[col_name].tolist():
+                text = str(raw).strip()
+                if text.lower() in {"", "nan", "none", "nat", "-"}:
+                    continue
+                key = text.upper()
+                if key in seen:
+                    continue
+                seen.add(key)
+                values.append(key)
+            return values or list(DEFAULT_ABSENCE_TYPES)
+        except Exception:
+            return list(DEFAULT_ABSENCE_TYPES)
+
+    def _load_absence_states_from_template(self) -> list[str]:
+        root = Path(__file__).resolve().parent.parent
+        path = root / "date.xlsx"
+        if not path.exists():
+            return list(DEFAULT_ABSENCE_STATES)
+        try:
+            with pd.ExcelFile(path) as excel:
+                sheet_map = {self._normalize_label(name): name for name in excel.sheet_names}
+            config_sheet = sheet_map.get(self._normalize_label("Config"))
+            if config_sheet is None:
+                return list(DEFAULT_ABSENCE_STATES)
+            cfg = pd.read_excel(path, sheet_name=config_sheet)
+            if cfg.empty:
+                return list(DEFAULT_ABSENCE_STATES)
+
+            columns = [str(col) for col in cfg.columns]
+            normalized = {self._normalize_label(col): col for col in columns}
+            col_name = normalized.get(self._normalize_label("Estados posibles"))
+            if col_name is None:
+                for col in columns:
+                    if "estado" in self._normalize_label(col):
+                        col_name = col
+                        break
+            if col_name is None:
+                return list(DEFAULT_ABSENCE_STATES)
+
+            values: list[str] = []
+            seen: set[str] = set()
+            for raw in cfg[col_name].tolist():
+                text = str(raw).strip()
+                if text.lower() in {"", "nan", "none", "nat", "-"}:
+                    continue
+                key = text.upper()
+                if key in seen:
+                    continue
+                seen.add(key)
+                values.append(key)
+            return values or list(DEFAULT_ABSENCE_STATES)
+        except Exception:
+            return list(DEFAULT_ABSENCE_STATES)
+
+    def _refresh_absence_type_options(self) -> None:
+        values = self._load_absence_types_from_template()
+        self._absence_type_values = values
+        if self.quick_type_menu is not None:
+            current = self.quick_type_menu.get().strip()
+            self.quick_type_menu.configure(values=values)
+            if current in values:
+                self.quick_type_menu.set(current)
+            elif values:
+                self.quick_type_menu.set(values[0])
+
+    def _sync_absence_types_dropdown_in_template(self) -> None:
+        root = Path(__file__).resolve().parent.parent
+        path = root / "date.xlsx"
+        if not path.exists():
+            return
+        values = self._absence_type_values or list(DEFAULT_ABSENCE_TYPES)
+        state_values = self._load_absence_states_from_template()
+        if not values:
+            return
+        try:
+            wb = load_workbook(path)
+            sheet_map = {self._normalize_label(name): name for name in wb.sheetnames}
+            aus_name = sheet_map.get(self._normalize_label("Ausencias"))
+            if aus_name is None:
+                return
+            ws = wb[aus_name]
+            header_values = [self._normalize_label(cell.value) for cell in ws[1]]
+            type_idx = None
+            state_idx = None
+            for idx, header in enumerate(header_values, start=1):
+                if "tipo ausencia" in header or header == "tipo":
+                    type_idx = idx
+                if header == "estado" or "estado" in header:
+                    state_idx = idx
+            if type_idx is None and state_idx is None:
+                return
+
+            if type_idx is not None:
+                type_col = get_column_letter(type_idx)
+                formula_values = [v.replace('"', "'") for v in values]
+                formula = '"' + ",".join(formula_values) + '"'
+                dv = DataValidation(type="list", formula1=formula, allow_blank=True)
+                ws.add_data_validation(dv)
+                dv.add(f"{type_col}2:{type_col}5000")
+
+            if state_idx is not None and state_values:
+                state_col = get_column_letter(state_idx)
+                state_formula_values = [v.replace('"', "'") for v in state_values]
+                state_formula = '"' + ",".join(state_formula_values) + '"'
+                state_dv = DataValidation(type="list", formula1=state_formula, allow_blank=True)
+                ws.add_data_validation(state_dv)
+                state_dv.add(f"{state_col}2:{state_col}5000")
+            wb.save(path)
+        except Exception:
+            # Si el archivo esta abierto en Excel o no se puede guardar, lo ignoramos silenciosamente.
+            return
+
     def _refresh_employee_options(self, source_path: Path | None = None) -> None:
         by_id: dict[str, str] = {}
 
@@ -1620,10 +1782,10 @@ class HikvisionApp(ctk.CTk):
             try:
                 sheet_to_use = None
                 if base_path.suffix.lower() in {".xlsx", ".xls"}:
-                    excel = pd.ExcelFile(base_path)
-                    normalized_map = {
-                        self._normalize_label(sheet_name): sheet_name for sheet_name in excel.sheet_names
-                    }
+                    with pd.ExcelFile(base_path) as excel:
+                        normalized_map = {
+                            self._normalize_label(sheet_name): sheet_name for sheet_name in excel.sheet_names
+                        }
                     sheet_to_use = normalized_map.get(self._normalize_label("Empleados"))
                 if sheet_to_use is not None:
                     base_df = pd.read_excel(base_path, sheet_name=sheet_to_use)

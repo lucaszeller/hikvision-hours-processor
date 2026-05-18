@@ -413,6 +413,7 @@ class ProcessorService:
         start_minutes: dict[str, int] = {}
         working_weekdays_by_employee: dict[str, set[int]] = {}
         split_schedule_by_employee: dict[str, dict[str, int | bool | None]] = {}
+        flexible_attendance_employee_ids: set[str] = set()
         for candidate in info_path_candidates:
             if candidate.exists():
                 try:
@@ -439,6 +440,11 @@ class ProcessorService:
                         }
                         for employee_id, values in profiles.items()
                     }
+                    flexible_attendance_employee_ids = {
+                        str(employee_id).strip()
+                        for employee_id, values in profiles.items()
+                        if bool(values.get("flexible_attendance", False))
+                    }
                 except ScheduleInfoError as exc:
                     raise ValidationError(str(exc)) from exc
                 break
@@ -452,6 +458,7 @@ class ProcessorService:
             scheduled_start_minute_by_employee=start_minutes,
             working_weekdays_by_employee=working_weekdays_by_employee,
             split_schedule_by_employee=split_schedule_by_employee,
+            flexible_attendance_employee_ids=flexible_attendance_employee_ids,
         )
 
         if progress_callback:

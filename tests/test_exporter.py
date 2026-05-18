@@ -98,6 +98,46 @@ def test_diario_domingo_row_is_light_gray(tmp_path: Path) -> None:
     assert _rgb(ws["G2"]).endswith("D9D9D9")
 
 
+def test_diario_presente_row_has_no_status_color_override(tmp_path: Path) -> None:
+    daily_df = pd.DataFrame(
+        {
+            "ID de persona": ["20"],
+            "Nombre": ["Ana"],
+            "Fecha": [pd.Timestamp("2026-05-20").date()],
+            "Departamento": ["A"],
+            "Estado": ["Presente"],
+            "Tramos trabajados": [""],
+            "Minutos reales": [540],
+            "Minutos redondeados": [540],
+            "Minutos extra": [0],
+            "Horas extra": ["00:00"],
+            "Horas totales": ["09:00"],
+        }
+    )
+    monthly_df = pd.DataFrame(
+        columns=[
+            "ID de persona",
+            "Nombre",
+            "Dias trabajados",
+            "Minutos totales",
+            "Minutos extra",
+            "Horas extra",
+            "Horas totales",
+        ]
+    )
+    inconsistencies_df = pd.DataFrame(
+        columns=["ID de persona", "Nombre", "Fecha", "Tipo de inconsistencia", "Detalle"]
+    )
+
+    output = tmp_path / "reporte_presente.xlsx"
+    export_report(output, daily_df, monthly_df, inconsistencies_df)
+
+    wb = load_workbook(output)
+    ws = wb["Diario"]
+    # Fila par con estado sin color especifico: conserva alternado, no color de estado.
+    assert _rgb(ws["A2"]).endswith("F5F8FC")
+
+
 def test_export_does_not_create_resumen_estudio_sheet(tmp_path: Path) -> None:
     daily_df = pd.DataFrame(
         {
@@ -374,6 +414,60 @@ def test_liquidar_adds_quincena_common_and_extra_totals(tmp_path: Path) -> None:
             row_day_20 = row
     assert row_day_18 is not None and row_day_18 > row_q1_end
     assert row_day_20 is not None and row_day_20 > row_q1_end
+
+
+def test_liquidar_adds_status_legend_at_bottom(tmp_path: Path) -> None:
+    daily_df = pd.DataFrame(
+        {
+            "ID de persona": ["20", "20"],
+            "Nombre": ["Ana", "Ana"],
+            "Fecha": [pd.Timestamp("2026-05-05").date(), pd.Timestamp("2026-05-06").date()],
+            "Departamento": ["A", "A"],
+            "Estado": ["Feriado", "Tardanza"],
+            "Tramos trabajados": ["", "07:31-12:00 [07:30-12:00]"],
+            "Minutos reales": [0, 269],
+            "Minutos redondeados": [0, 240],
+            "Minutos extra": [0, 0],
+            "Horas extra": ["00:00", "00:00"],
+            "Horas totales": ["00:00", "04:00"],
+        }
+    )
+    monthly_df = pd.DataFrame(
+        columns=[
+            "ID de persona",
+            "Nombre",
+            "Dias trabajados",
+            "Minutos totales",
+            "Minutos extra",
+            "Horas extra",
+            "Horas totales",
+        ]
+    )
+    inconsistencies_df = pd.DataFrame(
+        columns=["ID de persona", "Nombre", "Fecha", "Tipo de inconsistencia", "Detalle"]
+    )
+
+    output = tmp_path / "reporte_liquidar_legend.xlsx"
+    export_report(output, daily_df, monthly_df, inconsistencies_df)
+
+    wb = load_workbook(output)
+    ws = wb["Liquidar"]
+
+    title_row = None
+    for row in range(1, ws.max_row + 1):
+        if ws.cell(row=row, column=1).value == "Leyenda de estados":
+            title_row = row
+            break
+    assert title_row is not None
+
+    found_feriado = False
+    for row in range(title_row + 1, ws.max_row + 1):
+        for text_col in (2, 4):
+            if ws.cell(row=row, column=text_col).value == "Feriado":
+                box_col = text_col - 1
+                assert _rgb(ws.cell(row=row, column=box_col)).endswith("A9DF8F")
+                found_feriado = True
+    assert found_feriado
 
 
 def test_export_creates_incidencias_sheet_with_summary_and_detail(tmp_path: Path) -> None:

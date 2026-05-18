@@ -33,6 +33,14 @@ def _is_yes(value: object) -> bool:
     return text in {"si", "s", "yes", "y", "true", "1"}
 
 
+def _is_flexible_attendance(name_value: object, group_value: object) -> bool:
+    name_key = _normalize(name_value)
+    group_key = _normalize(group_value)
+    if name_key == "juarez paulina":
+        return True
+    return any(token in group_key for token in {"maestranza", "limpieza"})
+
+
 def _to_time(value: object) -> pd.Timestamp | None:
     if pd.isna(value):
         return None
@@ -130,8 +138,8 @@ def load_schedule_profiles(info_path: str | Path) -> dict[str, dict[str, Any]]:
         return {}
 
     try:
-        excel = pd.ExcelFile(path)
-        normalized_sheets = {_normalize(name): name for name in excel.sheet_names}
+        with pd.ExcelFile(path) as excel:
+            normalized_sheets = {_normalize(name): name for name in excel.sheet_names}
         preferred_sheet = normalized_sheets.get(_normalize("Empleados"))
         if preferred_sheet is not None:
             df = pd.read_excel(path, sheet_name=preferred_sheet)
@@ -151,6 +159,8 @@ def load_schedule_profiles(info_path: str | Path) -> dict[str, dict[str, Any]]:
     col_t_out = _best_column(columns, ["horario salida tarde", "salida tarde"])
     col_corrido = _best_column(columns, ["horario corrido", "corrido"])
     col_days = _best_column(columns, ["dias", "dias laborales", "dias de trabajo"])
+    col_name = _best_column(columns, ["nombre", "name", "empleado"])
+    col_group = _best_column(columns, ["grupo", "sector", "area"])
 
     if col_id is None:
         raise ScheduleInfoError("No se encontro columna de ID en el archivo de horarios.")
@@ -166,6 +176,10 @@ def load_schedule_profiles(info_path: str | Path) -> dict[str, dict[str, Any]]:
         afternoon_in = _to_time(row[col_t_in]) if col_t_in else None
         afternoon_out = _to_time(row[col_t_out]) if col_t_out else None
         is_continuous = _is_yes(row[col_corrido]) if col_corrido else False
+        is_flexible = _is_flexible_attendance(
+            row[col_name] if col_name else "",
+            row[col_group] if col_group else "",
+        )
 
         if is_continuous:
             start = morning_in or afternoon_in
@@ -190,6 +204,7 @@ def load_schedule_profiles(info_path: str | Path) -> dict[str, dict[str, Any]]:
                 "morning_out_minute": _to_minute_of_day(morning_out),
                 "afternoon_in_minute": _to_minute_of_day(afternoon_in),
                 "afternoon_out_minute": _to_minute_of_day(afternoon_out),
+                "flexible_attendance": bool(is_flexible),
             }
 
     return result

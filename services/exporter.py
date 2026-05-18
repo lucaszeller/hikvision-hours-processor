@@ -18,6 +18,7 @@ ALT_ROW_FILL = PatternFill("solid", fgColor="F5F8FC")
 STATUS_STYLES = {
     # Base
     "normal": {"fill": None, "font": None},
+    "presente": {"fill": None, "font": None},
     "domingo": {"fill": PatternFill("solid", fgColor="D9D9D9"), "font": None},  # gris
     "tarde": {"fill": PatternFill("solid", fgColor="2E7D32"), "font": Font(color="FFFFFF", bold=True)},  # verde oscuro
     "tardanza": {"fill": PatternFill("solid", fgColor="2E7D32"), "font": Font(color="FFFFFF", bold=True)},
@@ -152,8 +153,8 @@ def _load_employee_catalog(base_dir: Path) -> tuple[list[tuple[str, str, str]], 
         if not path.exists():
             continue
         try:
-            excel = pd.ExcelFile(path)
-            sheet_map = {_normalize(name): name for name in excel.sheet_names}
+            with pd.ExcelFile(path) as excel:
+                sheet_map = {_normalize(name): name for name in excel.sheet_names}
             sheet_name = sheet_map.get(_normalize("Empleados"))
             if sheet_name is not None:
                 df = pd.read_excel(path, sheet_name=sheet_name)
@@ -431,11 +432,11 @@ def _apply_liquidar_format(
                 cell.fill = ALT_ROW_FILL
             if (not is_daily_row) and row_label:
                 if "horas extras" in row_label:
-                    cell.fill = PatternFill("solid", fgColor="FFF3E0")
+                    cell.fill = PatternFill("solid", fgColor="FFD7B5")
                 elif "horas comunes" in row_label:
-                    cell.fill = PatternFill("solid", fgColor="E3F2FD")
-                if "total mes" in row_label:
-                    cell.font = Font(color="0F172A", bold=True)
+                    cell.fill = PatternFill("solid", fgColor="C7E0FF")
+                # Quincenas y total mensual: resaltar letras y valores.
+                cell.font = Font(color="0F172A", bold=True)
 
             if col_idx == 1 and is_daily_row and cell.value not in ("", None):
                 cell.number_format = "DD/MM/YYYY"
@@ -457,6 +458,62 @@ def _apply_liquidar_format(
             cell.fill = fill
         if font is not None:
             cell.font = font
+
+    _append_liquidar_legend(worksheet)
+
+
+def _append_liquidar_legend(worksheet) -> None:
+    legend_items = [
+        ("Domingo", "domingo"),
+        ("Ausente", "ausente"),
+        ("Vacaciones", "vacaciones"),
+        ("Estudiar", "estudiar"),
+        ("Capacitacion", "capacitacion"),
+        ("Suspencion", "suspencion"),
+        ("No trabajado", "no trabajado"),
+        ("Licencia", "licencia"),
+        ("Feriado", "feriado"),
+        ("Accidente de trabajo", "accidente de trabajo"),
+        ("Tardanza", "tardanza"),
+    ]
+
+    start_row = worksheet.max_row + 2
+    title_cell = worksheet.cell(row=start_row, column=1)
+    title_cell.value = "Leyenda de estados"
+    title_cell.fill = HEADER_FILL
+    title_cell.font = HEADER_FONT
+    title_cell.alignment = Alignment(horizontal="left", vertical="center")
+    title_cell.border = THIN_BORDER
+    worksheet.merge_cells(
+        start_row=start_row,
+        start_column=1,
+        end_row=start_row,
+        end_column=4,
+    )
+    for col in range(1, 5):
+        worksheet.cell(row=start_row, column=col).border = THIN_BORDER
+
+    for idx, (label, status_key) in enumerate(legend_items):
+        row_idx = start_row + 1 + (idx // 2)
+        if idx % 2 == 0:
+            box_col, text_col = 1, 2
+        else:
+            box_col, text_col = 3, 4
+
+        box = worksheet.cell(row=row_idx, column=box_col)
+        text = worksheet.cell(row=row_idx, column=text_col)
+        style = _status_style(status_key)
+
+        box.value = ""
+        box.border = THIN_BORDER
+        fill = style.get("fill")
+        if fill is not None:
+            box.fill = fill
+
+        text.value = label
+        text.border = THIN_BORDER
+        text.alignment = Alignment(horizontal="left", vertical="center")
+        text.font = Font(color="000000", bold=True)
 
 
 def _apply_incidencias_format(worksheet, summary_rows: int, detail_header_row: int) -> None:

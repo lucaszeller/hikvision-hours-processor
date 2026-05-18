@@ -126,11 +126,11 @@ def _find_sheet_name(file_path: Path, candidates: list[str]) -> str | None:
     if file_path.suffix.lower() not in {".xlsx", ".xls"}:
         return None
     try:
-        excel = pd.ExcelFile(file_path)
+        with pd.ExcelFile(file_path) as excel:
+            normalized_map = {_normalize_sheet_name(name): name for name in excel.sheet_names}
     except Exception as exc:
         raise ExceptionConfigError(f"No se pudo leer archivo de excepciones '{file_path}': {exc}") from exc
 
-    normalized_map = {_normalize_sheet_name(name): name for name in excel.sheet_names}
     for candidate in candidates:
         key = _normalize_sheet_name(candidate)
         if key in normalized_map:
