@@ -72,4 +72,30 @@ def test_load_schedule_profiles_parses_custom_working_days(tmp_path: Path) -> No
     profiles = load_schedule_profiles(file_path)
 
     assert profiles["118"]["scheduled_minutes"] == 270
+    assert profiles["118"]["is_continuous"] is True
     assert set(profiles["118"]["working_weekdays"]) == {0, 2, 4}
+
+
+def test_load_schedule_profiles_exposes_split_shift_minutes(tmp_path: Path) -> None:
+    sample = pd.DataFrame(
+        {
+            "Id": ["20"],
+            "Nombre": ["Ana"],
+            "horario ingreso Mañana": ["07:30:00"],
+            "Horario salida Mañana": ["12:00:00"],
+            "Horario Ingreso Tarde": ["13:00:00"],
+            "Horario Salida Tarde": ["17:30:00"],
+            "Horario corrido": ["NO"],
+        }
+    )
+    file_path = tmp_path / "date.xlsx"
+    with pd.ExcelWriter(file_path, engine="openpyxl") as writer:
+        sample.to_excel(writer, sheet_name="Empleados", index=False)
+
+    profiles = load_schedule_profiles(file_path)
+
+    assert profiles["20"]["is_continuous"] is False
+    assert profiles["20"]["morning_in_minute"] == 450
+    assert profiles["20"]["morning_out_minute"] == 720
+    assert profiles["20"]["afternoon_in_minute"] == 780
+    assert profiles["20"]["afternoon_out_minute"] == 1050

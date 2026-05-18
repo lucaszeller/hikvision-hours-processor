@@ -98,7 +98,7 @@ def test_diario_domingo_row_is_light_gray(tmp_path: Path) -> None:
     assert _rgb(ws["G2"]).endswith("D9D9D9")
 
 
-def test_export_creates_resumen_estudio_sheet(tmp_path: Path) -> None:
+def test_export_does_not_create_resumen_estudio_sheet(tmp_path: Path) -> None:
     daily_df = pd.DataFrame(
         {
             "ID de persona": ["20", "30"],
@@ -133,14 +133,7 @@ def test_export_creates_resumen_estudio_sheet(tmp_path: Path) -> None:
     export_report(output, daily_df, monthly_df, inconsistencies_df)
 
     wb = load_workbook(output)
-    assert "resumen-estudio" in wb.sheetnames
-    ws = wb["resumen-estudio"]
-    headers = [ws["A1"].value, ws["B1"].value, ws["C1"].value, ws["D1"].value]
-    assert headers == ["Dia de semana", "Nombre del empleado", "Horas normales", "Horas extra"]
-    assert ws["A2"].value == "Martes"
-    assert ws["B2"].value == "Ana"
-    assert ws["C2"].value == "04:00"
-    assert ws["D2"].value == "00:30"
+    assert "resumen-estudio" not in wb.sheetnames
 
 
 def test_export_creates_liquidar_sheet_with_status_colors(tmp_path: Path) -> None:
@@ -381,3 +374,93 @@ def test_liquidar_adds_quincena_common_and_extra_totals(tmp_path: Path) -> None:
             row_day_20 = row
     assert row_day_18 is not None and row_day_18 > row_q1_end
     assert row_day_20 is not None and row_day_20 > row_q1_end
+
+
+def test_export_creates_incidencias_sheet_with_summary_and_detail(tmp_path: Path) -> None:
+    daily_df = pd.DataFrame(
+        {
+            "ID de persona": ["20", "20", "30", "30"],
+            "Nombre": ["Ana", "Ana", "Luis", "Luis"],
+            "Fecha": [
+                pd.Timestamp("2026-05-05").date(),
+                pd.Timestamp("2026-05-06").date(),
+                pd.Timestamp("2026-05-05").date(),
+                pd.Timestamp("2026-05-06").date(),
+            ],
+            "Departamento": ["A", "A", "B", "B"],
+            "Estado": ["Tarde", "Ausente", "Normal", "Tardanza"],
+            "Tramos trabajados": ["07:31 - 12:00", "", "08:00 - 12:00", "08:05 - 12:00"],
+            "Minutos reales": [269, 0, 240, 235],
+            "Minutos redondeados": [270, 0, 240, 240],
+            "Minutos extra": [0, 0, 0, 0],
+            "Horas extra": ["00:00", "00:00", "00:00", "00:00"],
+            "Horas totales": ["04:30", "00:00", "04:00", "04:00"],
+        }
+    )
+    monthly_df = pd.DataFrame(
+        columns=[
+            "ID de persona",
+            "Nombre",
+            "Dias trabajados",
+            "Minutos totales",
+            "Minutos extra",
+            "Horas extra",
+            "Horas totales",
+        ]
+    )
+    inconsistencies_df = pd.DataFrame(
+        columns=["ID de persona", "Nombre", "Fecha", "Tipo de inconsistencia", "Detalle"]
+    )
+
+    output = tmp_path / "reporte_incidencias.xlsx"
+    export_report(output, daily_df, monthly_df, inconsistencies_df)
+
+    wb = load_workbook(output)
+    assert "Incidencias" in wb.sheetnames
+    ws = wb["Incidencias"]
+
+    # Resumen (arriba)
+    assert ws["A1"].value == "ID de persona"
+    assert ws["B1"].value == "Nombre"
+    assert ws["C1"].value == "Total tardanzas"
+    assert ws["D1"].value == "Total ausencias"
+
+    # Ana: 1 tarde, 1 ausente. Luis: 1 tardanza, 0 ausencias.
+    summary = {}
+    row = 2
+    while ws.cell(row=row, column=1).value not in ("", None):
+        emp_id = str(ws.cell(row=row, column=1).value)
+        summary[emp_id] = {
+            "tardanzas": ws.cell(row=row, column=3).value,
+            "ausencias": ws.cell(row=row, column=4).value,
+        }
+        row += 1
+    assert summary["20"]["tardanzas"] == 1
+    assert summary["20"]["ausencias"] == 1
+    assert summary["30"]["tardanzas"] == 1
+    assert summary["30"]["ausencias"] == 0
+
+    # Detalle debajo: fecha/estado/fichada de tarde+ausente.
+    detail_header_row = row + 2
+    assert ws.cell(row=detail_header_row, column=1).value == "ID de persona"
+    assert ws.cell(row=detail_header_row, column=2).value == "Nombre"
+    assert ws.cell(row=detail_header_row, column=3).value == "Fecha"
+    assert ws.cell(row=detail_header_row, column=4).value == "Estado"
+    assert ws.cell(row=detail_header_row, column=5).value == "Fichada"
+
+    details = []
+    current = detail_header_row + 1
+    while ws.cell(row=current, column=1).value not in ("", None):
+        fichada_value = ws.cell(row=current, column=5).value
+        details.append(
+            (
+                str(ws.cell(row=current, column=1).value),
+                str(ws.cell(row=current, column=4).value),
+                "" if fichada_value in ("", None) else str(fichada_value),
+            )
+        )
+        current += 1
+
+    assert ("20", "Tarde", "07:31 - 12:00") in details
+    assert ("20", "Ausente", "") in details
+    assert ("30", "Tardanza", "08:05 - 12:00") in details

@@ -83,18 +83,6 @@ SHEET_LAYOUTS = {
         "date_cols": set(),
         "priority_sort": ["ID de persona", "Nombre"],
     },
-    "resumen-estudio": {
-        "widths": {
-            "Dia de semana": 18,
-            "Nombre del empleado": 34,
-            "Horas normales": 18,
-            "Horas extra": 16,
-        },
-        "left_cols": {"Dia de semana", "Nombre del empleado"},
-        "wrap_cols": set(),
-        "date_cols": set(),
-        "priority_sort": ["Dia de semana", "Nombre del empleado"],
-    },
     "Liquidar": {
         "widths": {
             "Fecha": 12,
@@ -107,6 +95,10 @@ SHEET_LAYOUTS = {
         "priority_sort": ["Fecha"],
     },
 }
+
+INCIDENCIAS_SHEET = "Incidencias"
+INCIDENCIAS_SUMMARY_COLUMNS = ["ID de persona", "Nombre", "Total tardanzas", "Total ausencias"]
+INCIDENCIAS_DETAIL_COLUMNS = ["ID de persona", "Nombre", "Fecha", "Estado", "Fichada"]
 
 
 def _sort_for_report(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
@@ -134,49 +126,6 @@ def _status_style(status_text: object) -> dict[str, object]:
         # Cualquier excepcion no mapeada explicitamente mantiene verde manzana por defecto.
         return STATUS_STYLES["feriado"]
     return STATUS_STYLES["normal"]
-
-
-def _weekday_name_es(value: object) -> str:
-    parsed = pd.to_datetime(value, errors="coerce")
-    if pd.isna(parsed):
-        return ""
-    names = [
-        "Lunes",
-        "Martes",
-        "Miercoles",
-        "Jueves",
-        "Viernes",
-        "Sabado",
-        "Domingo",
-    ]
-    return names[int(parsed.weekday())]
-
-
-def _build_study_summary(daily_df: pd.DataFrame) -> pd.DataFrame:
-    columns = ["Dia de semana", "Nombre del empleado", "Horas normales", "Horas extra"]
-    if daily_df.empty:
-        return pd.DataFrame(columns=columns)
-
-    needed = {"Fecha", "Nombre", "Minutos redondeados", "Minutos extra"}
-    if not needed.issubset(set(daily_df.columns)):
-        return pd.DataFrame(columns=columns)
-
-    working = daily_df.copy()
-    working["_FechaOrden"] = pd.to_datetime(working["Fecha"], errors="coerce")
-    working = working.sort_values(["_FechaOrden", "Nombre"], kind="stable").reset_index(drop=True)
-    total_minutes = pd.to_numeric(working["Minutos redondeados"], errors="coerce").fillna(0).astype(int)
-    extra_minutes = pd.to_numeric(working["Minutos extra"], errors="coerce").fillna(0).astype(int)
-    normal_minutes = (total_minutes - extra_minutes).clip(lower=0)
-
-    summary = pd.DataFrame(
-        {
-            "Dia de semana": working["Fecha"].map(_weekday_name_es),
-            "Nombre del empleado": working["Nombre"].astype(str),
-            "Horas normales": normal_minutes.map(_minutes_to_hhmm),
-            "Horas extra": extra_minutes.map(_minutes_to_hhmm),
-        }
-    )
-    return summary
 
 
 def _load_employee_catalog(base_dir: Path) -> tuple[list[tuple[str, str, str]], bool]:
@@ -243,6 +192,72 @@ def _load_employee_catalog(base_dir: Path) -> tuple[list[tuple[str, str, str]], 
         result.append((emp_id, emp_name, f"{emp_id} {emp_name}"))
     result.sort(key=lambda item: (item[1].lower(), item[0]))
     return result, loaded_from_file
+
+
+def _build_incidencias_tables(
+    daily_df: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    summary_empty = pd.DataFrame(columns=INCIDENCIAS_SUMMARY_COLUMNS)
+    detail_empty = pd.DataFrame(columns=INCIDENCIAS_DETAIL_COLUMNS)
+    if daily_df.empty:
+        return summary_empty, detail_empty
+
+    needed = {"ID de persona", "Nombre", "Fecha", "Estado", "Tramos trabajados"}
+    if not needed.issubset(set(daily_df.columns)):
+        return summary_empty, detail_empty
+
+    working = daily_df.copy()
+    working["ID de persona"] = working["ID de persona"].astype(str).str.strip()
+    working["Nombre"] = working["Nombre"].astype(str).str.strip()
+    working["_FechaOrden"] = pd.to_datetime(working["Fecha"], errors="coerce")
+    working["_estado_norm"] = working["Estado"].map(_normalize_status)
+    working["_es_tarde"] = working["_estado_norm"].isin({"tarde", "tardanza"})
+    working["_es_ausente"] = working["_estado_norm"].isin({"ausente", "ausencia"})
+
+    employees = (
+        working[["ID de persona", "Nombre"]]
+        .drop_duplicates()
+        .sort_values(["Nombre", "ID de persona"], kind="stable")
+        .reset_index(drop=True)
+    )
+    tardy_counts = (
+        working.groupby(["ID de persona", "Nombre"], as_index=False)["_es_tarde"]
+        .sum()
+        .rename(columns={"_es_tarde": "Total tardanzas"})
+    )
+    absent_counts = (
+        working.groupby(["ID de persona", "Nombre"], as_index=False)["_es_ausente"]
+        .sum()
+        .rename(columns={"_es_ausente": "Total ausencias"})
+    )
+
+    summary = employees.merge(tardy_counts, on=["ID de persona", "Nombre"], how="left").merge(
+        absent_counts,
+        on=["ID de persona", "Nombre"],
+        how="left",
+    )
+    summary["Total tardanzas"] = summary["Total tardanzas"].fillna(0).astype(int)
+    summary["Total ausencias"] = summary["Total ausencias"].fillna(0).astype(int)
+    summary = summary[INCIDENCIAS_SUMMARY_COLUMNS]
+
+    detail = working[(working["_es_tarde"]) | (working["_es_ausente"])].copy()
+    if detail.empty:
+        return summary, detail_empty
+
+    detail = detail.sort_values(
+        ["ID de persona", "_FechaOrden", "Nombre"],
+        kind="stable",
+    )
+    detail_df = pd.DataFrame(
+        {
+            "ID de persona": detail["ID de persona"],
+            "Nombre": detail["Nombre"],
+            "Fecha": detail["Fecha"],
+            "Estado": detail["Estado"].astype(str),
+            "Fichada": detail["Tramos trabajados"].fillna("").astype(str),
+        }
+    )
+    return summary, detail_df[INCIDENCIAS_DETAIL_COLUMNS]
 
 
 def _build_liquidar_sheet(
@@ -444,6 +459,76 @@ def _apply_liquidar_format(
             cell.font = font
 
 
+def _apply_incidencias_format(worksheet, summary_rows: int, detail_header_row: int) -> None:
+    headers_row_1 = [cell.value for cell in worksheet[1]]
+    header_row_1_idx = {str(value): idx + 1 for idx, value in enumerate(headers_row_1) if value is not None}
+
+    worksheet.freeze_panes = "A2"
+
+    for col_idx, width in enumerate((14, 30, 16, 16, 56), start=1):
+        worksheet.column_dimensions[get_column_letter(col_idx)].width = width
+
+    # Header resumen (fila 1)
+    for cell in worksheet[1]:
+        if cell.value is None:
+            continue
+        cell.fill = HEADER_FILL
+        cell.font = HEADER_FONT
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+        cell.border = THIN_BORDER
+
+    # Filas resumen
+    for row_idx in range(2, summary_rows + 2):
+        for col_idx in range(1, 5):
+            cell = worksheet.cell(row=row_idx, column=col_idx)
+            cell.border = THIN_BORDER
+            if row_idx % 2 == 0:
+                cell.fill = ALT_ROW_FILL
+            horizontal = "left" if col_idx == 2 else "center"
+            cell.alignment = Alignment(horizontal=horizontal, vertical="center")
+
+    # Header detalle
+    for col_idx in range(1, 6):
+        cell = worksheet.cell(row=detail_header_row, column=col_idx)
+        if cell.value is None:
+            continue
+        cell.fill = HEADER_FILL
+        cell.font = HEADER_FONT
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+        cell.border = THIN_BORDER
+
+    # Detalle filas
+    for row_idx in range(detail_header_row + 1, worksheet.max_row + 1):
+        status_text = worksheet.cell(row=row_idx, column=4).value
+        style = _status_style(status_text)
+        row_fill = style.get("fill")
+        row_font = style.get("font")
+        for col_idx in range(1, 6):
+            cell = worksheet.cell(row=row_idx, column=col_idx)
+            cell.border = THIN_BORDER
+            if row_fill is not None:
+                cell.fill = row_fill
+            elif row_idx % 2 == 0:
+                cell.fill = ALT_ROW_FILL
+            if row_font is not None:
+                cell.font = row_font
+            if col_idx == 3 and cell.value not in ("", None):
+                cell.number_format = "DD/MM/YYYY"
+            if col_idx in {2, 5}:
+                horizontal = "left"
+            else:
+                horizontal = "center"
+            cell.alignment = Alignment(
+                horizontal=horizontal,
+                vertical="top",
+                wrap_text=(col_idx == 5),
+            )
+
+    # Keep filter on summary header row only
+    if header_row_1_idx:
+        worksheet.auto_filter.ref = f"A1:D{max(1, summary_rows + 1)}"
+
+
 def _apply_sheet_format(worksheet, sheet_name: str) -> None:
     config = SHEET_LAYOUTS[sheet_name]
     headers = [cell.value for cell in worksheet[1]]
@@ -507,7 +592,7 @@ def export_report(
 
     diario_export = _sort_for_report(daily_df.copy(), SHEET_LAYOUTS["Diario"]["priority_sort"])
     mensual_export = _sort_for_report(monthly_df.copy(), SHEET_LAYOUTS["Mensual"]["priority_sort"])
-    resumen_estudio_export = _build_study_summary(diario_export)
+    incidencias_summary, incidencias_detail = _build_incidencias_tables(diario_export)
     liquidar_export, liquidar_status_cells = _build_liquidar_sheet(
         diario_export,
         output.parent,
@@ -516,12 +601,24 @@ def export_report(
         with pd.ExcelWriter(temp_output, engine="openpyxl") as writer:
             diario_export.to_excel(writer, sheet_name="Diario", index=False)
             mensual_export.to_excel(writer, sheet_name="Mensual", index=False)
-            resumen_estudio_export.to_excel(writer, sheet_name="resumen-estudio", index=False)
+            incidencias_summary.to_excel(writer, sheet_name=INCIDENCIAS_SHEET, index=False)
+            detail_startrow = len(incidencias_summary) + 3
+            incidencias_detail.to_excel(
+                writer,
+                sheet_name=INCIDENCIAS_SHEET,
+                index=False,
+                startrow=detail_startrow,
+            )
             liquidar_export.to_excel(writer, sheet_name="Liquidar", index=False)
 
             workbook = writer.book
-            for sheet_name in ("Diario", "Mensual", "resumen-estudio"):
+            for sheet_name in ("Diario", "Mensual"):
                 _apply_sheet_format(workbook[sheet_name], sheet_name)
+            _apply_incidencias_format(
+                workbook[INCIDENCIAS_SHEET],
+                summary_rows=len(incidencias_summary),
+                detail_header_row=detail_startrow + 1,
+            )
             _apply_liquidar_format(workbook["Liquidar"], liquidar_status_cells)
 
         temp_output.replace(output)

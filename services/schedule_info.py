@@ -185,6 +185,11 @@ def load_schedule_profiles(info_path: str | Path) -> dict[str, dict[str, Any]]:
                 "scheduled_minutes": _round_to_30(scheduled),
                 "start_minute": start_minute if start_minute is not None else 0,
                 "working_weekdays": working_weekdays,
+                "is_continuous": bool(is_continuous),
+                "morning_in_minute": _to_minute_of_day(morning_in),
+                "morning_out_minute": _to_minute_of_day(morning_out),
+                "afternoon_in_minute": _to_minute_of_day(afternoon_in),
+                "afternoon_out_minute": _to_minute_of_day(afternoon_out),
             }
 
     return result

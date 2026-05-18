@@ -481,3 +481,97 @@ def test_empty_input_returns_empty_dataframes_with_expected_columns() -> None:
         "Detalle",
     ]
     assert daily.empty and monthly.empty and inconsistencies.empty
+
+
+def test_split_schedule_two_punches_uses_theoretical_segments_without_missing_punch_inconsistencies() -> None:
+    df = pd.DataFrame(
+        {
+            "employee_id": ["20", "20"],
+            "employee_name": ["Ana", "Ana"],
+            "department": ["A", "A"],
+            "schedule": ["", ""],
+            "work_date_raw": ["2026-05-05", "2026-05-05"],
+            "entry_time_raw": ["07:45", ""],
+            "exit_time_raw": ["", "17:40"],
+            "late_raw": ["", ""],
+            "absent_raw": ["", ""],
+        }
+    )
+
+    split_profiles = {
+        "20": {
+            "is_continuous": False,  # Horario corrido = NO
+            "morning_in_minute": 450,
+            "morning_out_minute": 720,
+            "afternoon_in_minute": 780,
+            "afternoon_out_minute": 1050,
+        }
+    }
+
+    daily, monthly, inconsistencies = process_punches(
+        df,
+        scheduled_minutes_by_employee={"20": 540},
+        scheduled_start_minute_by_employee={"20": 450},
+        split_schedule_by_employee=split_profiles,
+    )
+
+    assert len(daily) == 1
+    assert int(daily.iloc[0]["Minutos redondeados"]) == 540
+    assert int(daily.iloc[0]["Minutos extra"]) == 0
+    assert daily.iloc[0]["Estado"] == "Tarde"
+    assert "07:45 - 17:40 (Fichada real)" in str(daily.iloc[0]["Tramos trabajados"])
+    assert "07:30 - 12:00" in str(daily.iloc[0]["Tramos trabajados"])
+    assert "13:00 - 17:30" in str(daily.iloc[0]["Tramos trabajados"])
+
+    assert len(monthly) == 1
+    assert int(monthly.iloc[0]["Minutos totales"]) == 540
+    assert int(monthly.iloc[0]["Minutos extra"]) == 0
+
+    if not inconsistencies.empty:
+        issue_types = set(inconsistencies["Tipo de inconsistencia"])
+        assert "Falta Registro de entrada" not in issue_types
+        assert "Falta Registro de salida" not in issue_types
+
+
+def test_split_schedule_single_continuous_row_is_not_counted_as_continuous_span() -> None:
+    df = pd.DataFrame(
+        {
+            "employee_id": ["20"],
+            "employee_name": ["Ana"],
+            "department": ["A"],
+            "schedule": [""],
+            "work_date_raw": ["2026-05-06"],
+            "entry_time_raw": ["07:30"],
+            "exit_time_raw": ["18:30"],  # sin fichadas intermedias
+            "late_raw": [""],
+            "absent_raw": [""],
+        }
+    )
+
+    split_profiles = {
+        "20": {
+            "is_continuous": False,  # Horario corrido = NO
+            "morning_in_minute": 450,
+            "morning_out_minute": 720,
+            "afternoon_in_minute": 780,
+            "afternoon_out_minute": 1050,
+        }
+    }
+
+    daily, monthly, _ = process_punches(
+        df,
+        scheduled_minutes_by_employee={"20": 540},
+        scheduled_start_minute_by_employee={"20": 450},
+        split_schedule_by_employee=split_profiles,
+    )
+
+    assert len(daily) == 1
+    # Debe tomar tramos teoricos (9h), no 11h continuas.
+    assert int(daily.iloc[0]["Minutos redondeados"]) == 540
+    assert int(daily.iloc[0]["Minutos extra"]) == 0
+    assert daily.iloc[0]["Horas totales"] == "09:00"
+    assert daily.iloc[0]["Horas extra"] == "00:00"
+
+    assert len(monthly) == 1
+    assert int(monthly.iloc[0]["Minutos totales"]) == 540
+    assert int(monthly.iloc[0]["Minutos extra"]) == 0

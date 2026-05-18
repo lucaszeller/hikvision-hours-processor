@@ -412,6 +412,7 @@ class ProcessorService:
         schedule_minutes: dict[str, int] = {}
         start_minutes: dict[str, int] = {}
         working_weekdays_by_employee: dict[str, set[int]] = {}
+        split_schedule_by_employee: dict[str, dict[str, int | bool | None]] = {}
         for candidate in info_path_candidates:
             if candidate.exists():
                 try:
@@ -428,6 +429,16 @@ class ProcessorService:
                         employee_id: set(values.get("working_weekdays", {0, 1, 2, 3, 4}))
                         for employee_id, values in profiles.items()
                     }
+                    split_schedule_by_employee = {
+                        employee_id: {
+                            "is_continuous": bool(values.get("is_continuous", False)),
+                            "morning_in_minute": values.get("morning_in_minute"),
+                            "morning_out_minute": values.get("morning_out_minute"),
+                            "afternoon_in_minute": values.get("afternoon_in_minute"),
+                            "afternoon_out_minute": values.get("afternoon_out_minute"),
+                        }
+                        for employee_id, values in profiles.items()
+                    }
                 except ScheduleInfoError as exc:
                     raise ValidationError(str(exc)) from exc
                 break
@@ -440,6 +451,7 @@ class ProcessorService:
             scheduled_minutes_by_employee=schedule_minutes,
             scheduled_start_minute_by_employee=start_minutes,
             working_weekdays_by_employee=working_weekdays_by_employee,
+            split_schedule_by_employee=split_schedule_by_employee,
         )
 
         if progress_callback:

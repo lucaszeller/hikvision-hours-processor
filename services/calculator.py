@@ -42,6 +42,7 @@ INCONSISTENCIAS_COLUMNS = [
 
 SATURDAY_START_MINUTE = 7 * 60 + 30
 
+
 def _minutes_to_hhmm(total_minutes: int) -> str:
     hours, minutes = divmod(max(0, int(total_minutes)), 60)
     return f"{hours:02d}:{minutes:02d}"
@@ -145,12 +146,61 @@ def _exception_summary(items: list[WorkException]) -> str:
     return " | ".join(parts)
 
 
+def _minute_to_datetime(work_date: date, minute_of_day: int | None) -> datetime | None:
+    if minute_of_day is None:
+        return None
+    minute_int = int(minute_of_day)
+    if minute_int < 0 or minute_int >= 24 * 60:
+        return None
+    hour, minute = divmod(minute_int, 60)
+    return datetime.combine(work_date, datetime.min.time()).replace(hour=hour, minute=minute, second=0)
+
+
+def _build_split_theoretical_segments(
+    employee_id: str,
+    employee_name: str,
+    work_date: date,
+    department: str,
+    profile: dict[str, int | bool | None],
+) -> list[dict]:
+    result: list[dict] = []
+    morning_start = _minute_to_datetime(work_date, profile.get("morning_in_minute"))
+    morning_end = _minute_to_datetime(work_date, profile.get("morning_out_minute"))
+    afternoon_start = _minute_to_datetime(work_date, profile.get("afternoon_in_minute"))
+    afternoon_end = _minute_to_datetime(work_date, profile.get("afternoon_out_minute"))
+    spans = [
+        (morning_start, morning_end, "Horario Manana"),
+        (afternoon_start, afternoon_end, "Horario Tarde"),
+    ]
+
+    for start_dt, end_dt, schedule_label in spans:
+        if start_dt is None or end_dt is None or end_dt <= start_dt:
+            continue
+        real_minutes = int(round((end_dt - start_dt).total_seconds() / 60))
+        rounded_minutes = _round_to_30(real_minutes)
+        result.append(
+            {
+                "employee_id": employee_id,
+                "employee_name": employee_name,
+                "department": department,
+                "work_date": work_date,
+                "entry_dt": start_dt,
+                "exit_dt": end_dt,
+                "schedule": schedule_label,
+                "real_minutes": real_minutes,
+                "rounded_minutes": rounded_minutes,
+            }
+        )
+    return result
+
+
 def process_punches(
     df: pd.DataFrame,
     exceptions: list[WorkException] | None = None,
     scheduled_minutes_by_employee: dict[str, int] | None = None,
     scheduled_start_minute_by_employee: dict[str, int] | None = None,
     working_weekdays_by_employee: dict[str, set[int]] | None = None,
+    split_schedule_by_employee: dict[str, dict[str, int | bool | None]] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     valid_segments: list[dict] = []
     inconsistencies: list[dict] = []
@@ -163,6 +213,7 @@ def process_punches(
     scheduled_minutes_by_employee = scheduled_minutes_by_employee or {}
     scheduled_start_minute_by_employee = scheduled_start_minute_by_employee or {}
     working_weekdays_by_employee = working_weekdays_by_employee or {}
+    split_schedule_by_employee = split_schedule_by_employee or {}
     has_schedule_reference = bool(scheduled_minutes_by_employee)
     exceptions_index = build_exception_index(exceptions)
     used_exception_keys: set[tuple[str | None, date, str, str]] = set()
@@ -426,13 +477,91 @@ def process_punches(
             }
         )
 
+    # Dias con horario cortado (Horario corrido = NO) y solo dos fichadas
+    # (primera entrada / ultima salida): usa tramos teoricos de horario y
+    # evita inconsistencias por fichadas intermedias faltantes.
+    split_two_punch_days: set[tuple[str, str, date]] = set()
+    actual_first_entry_minutes_by_day: dict[tuple[str, str, date], int] = {}
+    actual_punch_range_text_by_day: dict[tuple[str, str, date], str] = {}
+    for day_key, data in partial_day_punches.items():
+        employee_id, employee_name, work_date = day_key
+        profile = split_schedule_by_employee.get(str(employee_id).strip(), {})
+        if bool(profile.get("is_continuous", False)):
+            continue
+        entries = list(data.get("entries", []))
+        exits = list(data.get("exits", []))
+        if not entries or not exits:
+            continue
+        total_punches = len(entries) + len(exits)
+        if total_punches != 2:
+            continue
+        has_theoretical_both_spans = (
+            profile.get("morning_in_minute") is not None
+            and profile.get("morning_out_minute") is not None
+            and profile.get("afternoon_in_minute") is not None
+            and profile.get("afternoon_out_minute") is not None
+        )
+        if not has_theoretical_both_spans:
+            continue
+        split_two_punch_days.add(day_key)
+        first_entry = min(entries)
+        last_exit = max(exits)
+        actual_first_entry_minutes_by_day[day_key] = first_entry.hour * 60 + first_entry.minute
+        actual_punch_range_text_by_day[day_key] = (
+            f"{first_entry.strftime('%H:%M')} - {last_exit.strftime('%H:%M')} (Fichada real)"
+        )
+
+    if split_two_punch_days:
+        suppress_types = {"Falta Registro de entrada", "Falta Registro de salida"}
+        filtered_inconsistencies: list[dict] = []
+        for issue in inconsistencies:
+            issue_type = str(issue.get("Tipo de inconsistencia", "")).strip()
+            if issue_type not in suppress_types:
+                filtered_inconsistencies.append(issue)
+                continue
+            issue_date = _parse_date(issue.get("Fecha"))
+            issue_key = (
+                str(issue.get("ID de persona", "")).strip(),
+                str(issue.get("Nombre", "")).strip(),
+                issue_date.date() if issue_date is not None else None,
+            )
+            if issue_key[2] is None or issue_key not in split_two_punch_days:
+                filtered_inconsistencies.append(issue)
+        inconsistencies = filtered_inconsistencies
+
     # Reconstruye jornada cuando Hikvision separa entrada/salida en filas distintas
     # y no existe ningun tramo completo para ese empleado/dia.
+    if split_two_punch_days:
+        preserved_segments: list[dict] = []
+        for seg in valid_segments:
+            seg_key = (str(seg["employee_id"]), str(seg["employee_name"]), seg["work_date"])
+            if seg_key in split_two_punch_days:
+                continue
+            preserved_segments.append(seg)
+        valid_segments = preserved_segments
+
     existing_day_keys = {
         (str(seg["employee_id"]), str(seg["employee_name"]), seg["work_date"])
         for seg in valid_segments
     }
     for day_key, data in partial_day_punches.items():
+        employee_id, employee_name, work_date = day_key
+        if day_key in split_two_punch_days:
+            profile = split_schedule_by_employee.get(str(employee_id).strip(), {})
+            department = " / ".join(sorted([d for d in data.get("departments", set()) if str(d).strip() != ""]))
+            synthetic_segments = _build_split_theoretical_segments(
+                employee_id=employee_id,
+                employee_name=employee_name,
+                work_date=work_date,
+                department=department,
+                profile=profile,
+            )
+            if synthetic_segments:
+                valid_segments.extend(synthetic_segments)
+                existing_day_keys.add(day_key)
+                if day_key in day_flags:
+                    day_flags[day_key]["absent"] = False
+            continue
         if day_key in existing_day_keys:
             continue
         entries = list(data.get("entries", []))
@@ -445,7 +574,6 @@ def process_punches(
         if end_dt <= start_dt:
             continue
 
-        employee_id, employee_name, work_date = day_key
         department = " / ".join(sorted([d for d in data.get("departments", set()) if str(d).strip() != ""]))
         schedule_value = " | ".join(sorted([s for s in data.get("schedules", set()) if str(s).strip() != ""]))
         real_minutes = int(round((end_dt - start_dt).total_seconds() / 60))
@@ -568,10 +696,18 @@ def process_punches(
             real_total = int(group["real_minutes"].sum())
             rounded_total = int(group["rounded_minutes"].sum())
             first_entry = group["entry_dt"].min()
+            day_key = (str(employee_id), str(employee_name), work_date)
+            punch_range_text = actual_punch_range_text_by_day.get(day_key)
+            if day_key in split_two_punch_days and punch_range_text:
+                segments_text = [punch_range_text] + segments_text
             first_entry_minutes = first_entry.hour * 60 + first_entry.minute
+            if day_key in actual_first_entry_minutes_by_day:
+                first_entry_minutes = int(actual_first_entry_minutes_by_day[day_key])
             day_first_entry_minutes[(str(employee_id), str(employee_name), work_date)] = first_entry_minutes
             employee_days = working_weekdays_by_employee.get(str(employee_id).strip(), {0, 1, 2, 3, 4})
-            if work_date.weekday() in {5, 6} or work_date.weekday() not in employee_days:
+            if day_key in split_two_punch_days:
+                overtime_minutes = 0
+            elif work_date.weekday() in {5, 6} or work_date.weekday() not in employee_days:
                 overtime_minutes = rounded_total
             else:
                 scheduled_minutes = scheduled_minutes_by_employee.get(str(employee_id).strip())
