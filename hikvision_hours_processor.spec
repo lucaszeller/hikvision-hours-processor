@@ -1,12 +1,16 @@
 # -*- mode: python ; coding: utf-8 -*-
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules
+
+datas = collect_data_files('customtkinter') + collect_data_files('tkcalendar')
+hiddenimports = collect_submodules('customtkinter') + collect_submodules('tkcalendar')
 
 
 a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=[],
-    hiddenimports=['customtkinter'],
+    datas=datas,
+    hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

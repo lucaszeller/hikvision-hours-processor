@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import queue
+import sys
 import threading
 import time
 from datetime import datetime, timedelta
@@ -45,6 +46,12 @@ DEFAULT_ABSENCE_TYPES = [
 ]
 DEFAULT_ABSENCE_STATES = ["PENDIENTE", "APROBADO", "RECHAZADO"]
 
+
+def get_app_base_dir() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent.parent
+
 COLOR_BG = ("#EEF3F8", "#0A1220")
 COLOR_PANEL = ("#FFFFFF", "#111827")
 COLOR_PANEL_SOFT = ("#F8FAFC", "#0F172A")
@@ -86,6 +93,10 @@ COLOR_LOG_ERROR = ("#B91C1C", "#FCA5A5")
 class HikvisionApp(ctk.CTk):
     def __init__(self) -> None:
         super().__init__()
+        self.app_base_dir = get_app_base_dir()
+        if getattr(sys, "frozen", False):
+            os.chdir(self.app_base_dir)
+
         self.title("Hikvision Hours Processor")
         self.geometry("1220x760")
         self.minsize(1080, 640)
@@ -684,7 +695,7 @@ class HikvisionApp(ctk.CTk):
         self._status_pulse_on = False
 
     def _mount_logo(self) -> None:
-        logo_path = Path(__file__).resolve().parent.parent / "logo.png"
+        logo_path = get_app_base_dir() / "logo.png"
         if not logo_path.exists():
             return
 
@@ -1504,7 +1515,7 @@ class HikvisionApp(ctk.CTk):
         self._refresh_context_panel()
 
     def _default_exceptions_path(self) -> Path:
-        return Path(__file__).resolve().parent.parent / DEFAULT_EXCEPTIONS_FILENAME
+        return get_app_base_dir() / DEFAULT_EXCEPTIONS_FILENAME
 
     def _initialize_default_exceptions_file(self) -> None:
         default_path = self._default_exceptions_path()
@@ -1632,7 +1643,7 @@ class HikvisionApp(ctk.CTk):
         self._set_employee_selector_values(labels)
 
     def _load_absence_types_from_template(self) -> list[str]:
-        root = Path(__file__).resolve().parent.parent
+        root = get_app_base_dir()
         path = root / "date.xlsx"
         if not path.exists():
             return list(DEFAULT_ABSENCE_TYPES)
@@ -1673,7 +1684,7 @@ class HikvisionApp(ctk.CTk):
             return list(DEFAULT_ABSENCE_TYPES)
 
     def _load_absence_states_from_template(self) -> list[str]:
-        root = Path(__file__).resolve().parent.parent
+        root = get_app_base_dir()
         path = root / "date.xlsx"
         if not path.exists():
             return list(DEFAULT_ABSENCE_STATES)
@@ -1725,7 +1736,7 @@ class HikvisionApp(ctk.CTk):
                 self.quick_type_menu.set(values[0])
 
     def _sync_absence_types_dropdown_in_template(self) -> None:
-        root = Path(__file__).resolve().parent.parent
+        root = get_app_base_dir()
         path = root / "date.xlsx"
         if not path.exists():
             return
@@ -1774,7 +1785,7 @@ class HikvisionApp(ctk.CTk):
     def _refresh_employee_options(self, source_path: Path | None = None) -> None:
         by_id: dict[str, str] = {}
 
-        root = Path(__file__).resolve().parent.parent
+        root = get_app_base_dir()
         base_candidates = [root / "date.xlsx", root / "info.xlsx"]
         for base_path in base_candidates:
             if not base_path.exists():
@@ -2111,7 +2122,7 @@ class HikvisionApp(ctk.CTk):
             messagebox.showerror("Error", f"No se pudo abrir el archivo:\n{exc}")
 
     def open_date_template_file(self) -> None:
-        date_path = Path(__file__).resolve().parent.parent / "date.xlsx"
+        date_path = get_app_base_dir() / "date.xlsx"
         if not date_path.exists():
             messagebox.showwarning(
                 "Archivo no encontrado",
