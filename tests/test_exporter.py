@@ -1162,3 +1162,115 @@ def test_hs_riorda_does_not_discount_system_extra_for_capped_profiles(tmp_path: 
 
     assert ws.cell(row=tuesday_row, column=elina_col).value == 6
     assert ws.cell(row=tuesday_row, column=lara_col).value == 7
+
+
+def test_hs_riorda_preserves_status_colors_when_not_below_target(tmp_path: Path) -> None:
+    daily_df = pd.DataFrame(
+        {
+            "ID de persona": ["93"],
+            "Nombre": ["Suarez Elina"],
+            "Fecha": [pd.Timestamp("2026-05-12").date()],
+            "Departamento": ["A"],
+            "Estado": ["Feriado"],
+            "Tramos trabajados": ["08:00 - 14:00"],
+            "Minutos reales": [360],
+            "Minutos redondeados": [360],
+            "Minutos extra": [0],
+            "Horas extra": ["00:00"],
+            "Horas totales": ["06:00"],
+        }
+    )
+    monthly_df = pd.DataFrame(
+        columns=[
+            "ID de persona",
+            "Nombre",
+            "Dias trabajados",
+            "Minutos totales",
+            "Minutos extra",
+            "Horas extra",
+            "Horas totales",
+        ]
+    )
+    inconsistencies_df = pd.DataFrame(
+        columns=["ID de persona", "Nombre", "Fecha", "Tipo de inconsistencia", "Detalle"]
+    )
+
+    output = tmp_path / "reporte_hs_riorda_colores_estado.xlsx"
+    export_report(output, daily_df, monthly_df, inconsistencies_df)
+
+    wb = load_workbook(output)
+    ws = wb["hs-riorda"]
+    headers = [ws.cell(row=1, column=col).value for col in range(1, ws.max_column + 1)]
+    header_to_idx = {str(h): idx + 1 for idx, h in enumerate(headers)}
+    elina_col = header_to_idx["93 Suarez Elina"]
+
+    tuesday_row = None
+    for row_idx in range(2, ws.max_row + 1):
+        if str(ws.cell(row=row_idx, column=2).value or "") == "Martes":
+            tuesday_row = row_idx
+            break
+    assert tuesday_row is not None
+
+    cell = ws.cell(row=tuesday_row, column=elina_col)
+    rgb = str(getattr(getattr(cell.fill, "fgColor", None), "rgb", "") or "").upper()
+    assert rgb.endswith("A9DF8F")
+
+
+def test_hs_riorda_keeps_exception_status_color_even_if_below_target(tmp_path: Path) -> None:
+    daily_df = pd.DataFrame(
+        {
+            "ID de persona": ["93", "99"],
+            "Nombre": ["Suarez Elina", "Fernandez Lara"],
+            "Fecha": [pd.Timestamp("2026-05-13").date(), pd.Timestamp("2026-05-13").date()],
+            "Departamento": ["A", "A"],
+            "Estado": ["Vacaciones", "Accidente de trabajo"],
+            "Tramos trabajados": ["", ""],
+            "Minutos reales": [0, 0],
+            "Minutos redondeados": [0, 0],
+            "Minutos extra": [0, 0],
+            "Horas extra": ["00:00", "00:00"],
+            "Horas totales": ["00:00", "00:00"],
+        }
+    )
+    monthly_df = pd.DataFrame(
+        columns=[
+            "ID de persona",
+            "Nombre",
+            "Dias trabajados",
+            "Minutos totales",
+            "Minutos extra",
+            "Horas extra",
+            "Horas totales",
+        ]
+    )
+    inconsistencies_df = pd.DataFrame(
+        columns=["ID de persona", "Nombre", "Fecha", "Tipo de inconsistencia", "Detalle"]
+    )
+
+    output = tmp_path / "reporte_hs_riorda_colores_excepciones.xlsx"
+    export_report(output, daily_df, monthly_df, inconsistencies_df)
+
+    wb = load_workbook(output)
+    ws = wb["hs-riorda"]
+    headers = [ws.cell(row=1, column=col).value for col in range(1, ws.max_column + 1)]
+    header_to_idx = {str(h): idx + 1 for idx, h in enumerate(headers)}
+    elina_col = header_to_idx["93 Suarez Elina"]
+    lara_col = header_to_idx["99 Fernandez Lara"]
+
+    wednesday_row = None
+    for row_idx in range(2, ws.max_row + 1):
+        if str(ws.cell(row=row_idx, column=2).value or "") == "Miercoles":
+            wednesday_row = row_idx
+            break
+    assert wednesday_row is not None
+
+    elina_rgb = str(
+        getattr(getattr(ws.cell(row=wednesday_row, column=elina_col).fill, "fgColor", None), "rgb", "") or ""
+    ).upper()
+    lara_rgb = str(
+        getattr(getattr(ws.cell(row=wednesday_row, column=lara_col).fill, "fgColor", None), "rgb", "") or ""
+    ).upper()
+
+    # Vacaciones = amarillo, ART = violeta; no deben volverse naranja.
+    assert elina_rgb.endswith("FFF59D")
+    assert lara_rgb.endswith("8E24AA")

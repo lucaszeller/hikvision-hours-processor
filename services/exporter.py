@@ -671,6 +671,7 @@ def _apply_liquidar_format(
 
     if highlight_below_daily_target and daily_target_hours_by_employee_id:
         highlight_fill = PatternFill("solid", fgColor="FFB74D")
+        orange_allowed_statuses = {"normal", "presente", "tarde", "tardanza", "domingo"}
         for row_idx in range(2, worksheet.max_row + 1):
             first_col_value = worksheet.cell(row=row_idx, column=1).value
             is_daily_row = pd.notna(pd.to_datetime(first_col_value, errors="coerce"))
@@ -684,6 +685,11 @@ def _apply_liquidar_format(
                 target_hours = daily_target_hours_by_employee_id.get(employee_id)
                 if target_hours is None:
                     continue
+                status_text = status_cells.get((row_idx, col_idx), "")
+                status_norm = _normalize_status(status_text)
+                if status_norm not in orange_allowed_statuses:
+                    # Mantener colores de estados especiales (vacaciones, ART, feriado, etc).
+                    continue
                 cell = worksheet.cell(row=row_idx, column=col_idx)
                 raw_value = cell.value
                 if raw_value in ("", None):
@@ -695,13 +701,6 @@ def _apply_liquidar_format(
                 if worked_hours + 1e-9 < float(target_hours):
                     cell.fill = highlight_fill
                     cell.font = Font(color="0F172A", bold=True)
-                else:
-                    # Sin alerta: deja el estilo base de la fila diaria.
-                    if row_idx % 2 == 0:
-                        cell.fill = ALT_ROW_FILL
-                    else:
-                        cell.fill = PatternFill(fill_type=None)
-                    cell.font = Font(color="0F172A", bold=False)
 
     _append_liquidar_legend(worksheet, avoid_dark_green=avoid_dark_green)
 
