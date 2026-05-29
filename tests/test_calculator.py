@@ -578,6 +578,46 @@ def test_split_schedule_single_continuous_row_is_not_counted_as_continuous_span(
     assert int(monthly.iloc[0]["Minutos extra"]) == 0
 
 
+def test_saturday_split_schedule_uses_single_morning_shift() -> None:
+    df = pd.DataFrame(
+        {
+            "employee_id": ["20", "20"],
+            "employee_name": ["Ana", "Ana"],
+            "department": ["A", "A"],
+            "schedule": ["", ""],
+            "work_date_raw": ["2026-05-09", "2026-05-09"],
+            "entry_time_raw": ["07:41", ""],
+            "exit_time_raw": ["", "11:36"],
+            "late_raw": ["", ""],
+            "absent_raw": ["", ""],
+        }
+    )
+
+    split_profiles = {
+        "20": {
+            "is_continuous": False,
+            "morning_in_minute": 450,
+            "morning_out_minute": 690,
+            "afternoon_in_minute": 810,
+            "afternoon_out_minute": 1080,
+        }
+    }
+
+    daily, _, inconsistencies = process_punches(
+        df,
+        scheduled_minutes_by_employee={"20": 240},
+        scheduled_start_minute_by_employee={"20": 450},
+        split_schedule_by_employee=split_profiles,
+    )
+
+    assert len(daily) == 1
+    tramos = str(daily.iloc[0]["Tramos trabajados"])
+    assert tramos == "07:41-11:36 [07:30-11:30]"
+    assert int(daily.iloc[0]["Minutos redondeados"]) == 210
+    assert int(daily.iloc[0]["Minutos extra"]) == 0
+    assert inconsistencies.empty
+
+
 def test_mixed_theoretical_and_normal_segments_do_not_fail_with_nat_in_display_columns() -> None:
     df = pd.DataFrame(
         {

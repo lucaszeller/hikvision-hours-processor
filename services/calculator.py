@@ -330,10 +330,11 @@ def _build_split_theoretical_segments(
     morning_end = _minute_to_datetime(work_date, profile.get("morning_out_minute"))
     afternoon_start = _minute_to_datetime(work_date, profile.get("afternoon_in_minute"))
     afternoon_end = _minute_to_datetime(work_date, profile.get("afternoon_out_minute"))
-    spans = [
-        (morning_start, morning_end, "Horario Manana"),
-        (afternoon_start, afternoon_end, "Horario Tarde"),
-    ]
+    spans = [(morning_start, morning_end, "Horario Manana")]
+
+    # Sabado: turno unico de 07:30 a 11:30, sin tramo de tarde.
+    if work_date.weekday() != 5:
+        spans.append((afternoon_start, afternoon_end, "Horario Tarde"))
 
     for idx, (start_dt, end_dt, schedule_label) in enumerate(spans):
         if start_dt is None or end_dt is None or end_dt <= start_dt:
@@ -345,7 +346,7 @@ def _build_split_theoretical_segments(
         display_exit = end_dt
         if idx == 0 and actual_first_entry is not None:
             display_entry = actual_first_entry
-        if idx == 1 and actual_last_exit is not None:
+        if actual_last_exit is not None and (idx == 1 or len(spans) == 1):
             display_exit = actual_last_exit
 
         result.append(
@@ -932,6 +933,7 @@ def process_punches(
             ["employee_id", "employee_name", "work_date"],
             sort=True,
         ):
+            day_key = (str(employee_id), str(employee_name), work_date)
             departments = [d for d in group["department"].astype(str).str.strip().unique() if d]
             department_value = " / ".join(departments)
 
@@ -941,8 +943,20 @@ def process_punches(
 
             real_total = int(group["real_minutes"].sum())
             rounded_total = int(group["rounded_minutes"].sum())
+            if work_date.weekday() == 5:
+                saturday_first_entry = actual_first_entry_by_day.get(day_key, group["entry_dt"].min())
+                saturday_last_exit = actual_last_exit_by_day.get(day_key, group["exit_dt"].max())
+                if isinstance(saturday_first_entry, datetime) and isinstance(saturday_last_exit, datetime):
+                    if saturday_last_exit > saturday_first_entry:
+                        real_total = int(round((saturday_last_exit - saturday_first_entry).total_seconds() / 60))
+                        rounded_total = _floor_to_30(real_total)
+                        segments_text = [
+                            (
+                                f"{saturday_first_entry.strftime('%H:%M')}-{saturday_last_exit.strftime('%H:%M')} "
+                                f"[07:30-11:30]"
+                            )
+                        ]
             first_entry = group["entry_dt"].min()
-            day_key = (str(employee_id), str(employee_name), work_date)
             first_entry_minutes = first_entry.hour * 60 + first_entry.minute
             if day_key in actual_first_entry_minutes_by_day:
                 first_entry_minutes = int(actual_first_entry_minutes_by_day[day_key])

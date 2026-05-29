@@ -314,7 +314,15 @@ def _build_liquidar_sheet(
 
     min_day = working["_fecha"].min().normalize()
     max_day = working["_fecha"].max().normalize()
-    all_days = [day for day in pd.date_range(min_day, max_day, freq="D") if int(day.weekday()) < 5]
+    worked_saturdays = {
+        day.normalize()
+        for day in working.loc[working["_fecha"].dt.weekday == 5, "_fecha"]
+    }
+    all_days = [
+        day
+        for day in pd.date_range(min_day, max_day, freq="D")
+        if int(day.weekday()) < 5 or day.normalize() in worked_saturdays
+    ]
 
     rows: list[dict[str, object]] = []
     cell_status_map: dict[tuple[int, int], str] = {}
