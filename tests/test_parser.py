@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 
 import pandas as pd
 
-from services.parser import detect_column_mapping
+from services.parser import detect_column_mapping, load_hikvision_excel
 
 
 def test_detect_column_mapping_hikvision_spanish_headers() -> None:
@@ -39,3 +40,23 @@ def test_date_and_time_strings_parse_with_pandas() -> None:
     assert joined.isna().sum() == 0
     assert joined.iloc[0].hour == 7
     assert joined.iloc[1].minute == 2
+
+
+def test_load_hikvision_excel_normalizes_employee_id_decimal_suffix(tmp_path: Path) -> None:
+    source = pd.DataFrame(
+        {
+            "ID de persona": [118.0],
+            "Nombre": ["Zeller Lucas Ezequiel"],
+            "Departamento": ["Administracion"],
+            "Fecha": ["2026-05-12"],
+            "Horario": ["(-)"],
+            "Registro de entrada": [""],
+            "Registro de salida": [""],
+        }
+    )
+    path = tmp_path / "reporte.xlsx"
+    source.to_excel(path, index=False)
+
+    parsed = load_hikvision_excel(path)
+
+    assert str(parsed.iloc[0]["employee_id"]) == "118"

@@ -62,7 +62,7 @@ def test_load_schedule_profiles_parses_custom_working_days(tmp_path: Path) -> No
             "Horario Ingreso Tarde": [None],
             "Horario Salida Tarde": [None],
             "Horario corrido": ["SI"],
-            "Dias": ["lunes miercoles y viernes"],
+            "Dias": ["lunes , miercoles y viernes"],
         }
     )
     file_path = tmp_path / "date.xlsx"

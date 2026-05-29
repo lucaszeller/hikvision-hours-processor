@@ -734,8 +734,8 @@ def test_export_creates_hs_riorda_sheet_with_only_target_employees(tmp_path: Pat
     assert "20 De Carli Gonzalo" in headers
     assert "67 Madera Adrián" in headers
     assert "30 ANA TEST" not in headers
-    # 3 columnas base + 22 empleados definidos.
-    assert ws.max_column == 25
+    # 3 columnas base + 20 empleados definidos.
+    assert ws.max_column == 23
 
 
 def test_hs_riorda_excludes_saturday_and_extra_summary_rows(tmp_path: Path) -> None:
@@ -1001,6 +1001,222 @@ def test_hs_riorda_adds_weekly_totals_and_keeps_quincena_total(tmp_path: Path) -
     assert q1_idx > week_2_idx
 
 
+def test_hs_riorda_marks_missing_scheduled_weekday_as_absent_and_keeps_non_working_day_blank(tmp_path: Path) -> None:
+    empleados_df = pd.DataFrame(
+        {
+            "Id": ["113", "118"],
+            "Nombre": ["Pelliza Roque", "Zeller Lucas Ezequiel"],
+            "horario ingreso Mañana": ["07:30:00", "07:30:00"],
+            "Horario salida Mañana": ["12:00:00", "12:00:00"],
+            "Horario Ingreso Tarde": ["13:30:00", None],
+            "Horario Salida Tarde": ["18:00:00", None],
+            "Horario corrido": ["NO", "SI"],
+            "Dias": ["lunes a viernes", "lunes , miercoles y viernes"],
+        }
+    )
+    with pd.ExcelWriter(tmp_path / "date.xlsx", engine="openpyxl") as writer:
+        empleados_df.to_excel(writer, sheet_name="Empleados", index=False)
+
+    daily_df = pd.DataFrame(
+        {
+            "ID de persona": ["113", "118"],
+            "Nombre": ["Pelliza Roque", "Zeller Lucas Ezequiel"],
+            "Fecha": [pd.Timestamp("2026-05-20").date(), pd.Timestamp("2026-05-22").date()],
+            "Departamento": ["A", "A"],
+            "Estado": ["Normal", "Normal"],
+            "Tramos trabajados": ["07:30 - 18:00", "07:30 - 12:00"],
+            "Minutos reales": [540, 270],
+            "Minutos redondeados": [540, 270],
+            "Minutos extra": [0, 0],
+            "Horas extra": ["00:00", "00:00"],
+            "Horas totales": ["09:00", "04:30"],
+        }
+    )
+    monthly_df = pd.DataFrame(
+        columns=[
+            "ID de persona",
+            "Nombre",
+            "Dias trabajados",
+            "Minutos totales",
+            "Minutos extra",
+            "Horas extra",
+            "Horas totales",
+        ]
+    )
+    inconsistencies_df = pd.DataFrame(
+        columns=["ID de persona", "Nombre", "Fecha", "Tipo de inconsistencia", "Detalle"]
+    )
+
+    output = tmp_path / "reporte_hs_riorda_ausente_programado.xlsx"
+    export_report(output, daily_df, monthly_df, inconsistencies_df)
+
+    wb = load_workbook(output)
+    ws = wb["hs-riorda"]
+    headers = [ws.cell(row=1, column=col).value for col in range(1, ws.max_column + 1)]
+    header_to_idx = {str(h): idx + 1 for idx, h in enumerate(headers)}
+    pelliza_col = header_to_idx["113 Pelliza Roque"]
+    zeller_col = header_to_idx["118 Zeller Lucas Ezequiel"]
+
+    row_2026_05_22 = None
+    row_2026_05_21 = None
+    for row_idx in range(2, ws.max_row + 1):
+        date_text = str(ws.cell(row=row_idx, column=1).value)
+        if "2026-05-22" in date_text:
+            row_2026_05_22 = row_idx
+        if "2026-05-21" in date_text:
+            row_2026_05_21 = row_idx
+
+    assert row_2026_05_22 is not None
+    assert row_2026_05_21 is not None
+
+    # Pelliza trabaja lun-vie: sin fichada en viernes debe verse como ausente 0.00.
+    assert ws.cell(row=row_2026_05_22, column=pelliza_col).value == 0
+    assert _rgb(ws.cell(row=row_2026_05_22, column=pelliza_col)).endswith("EF9A9A")
+    # Zeller no trabaja jueves: si no hay fichada, debe quedar en blanco (no ausente).
+    assert ws.cell(row=row_2026_05_21, column=zeller_col).value in ("", None)
+
+
+def test_hs_riorda_marks_absent_for_all_except_zeller_even_if_days_config_differs(tmp_path: Path) -> None:
+    empleados_df = pd.DataFrame(
+        {
+            "Id": ["113", "118"],
+            "Nombre": ["Pelliza Roque", "Zeller Lucas Ezequiel"],
+            "horario ingreso Mañana": ["07:30:00", "07:30:00"],
+            "Horario salida Mañana": ["12:00:00", "12:00:00"],
+            "Horario Ingreso Tarde": ["13:30:00", None],
+            "Horario Salida Tarde": ["18:00:00", None],
+            "Horario corrido": ["NO", "SI"],
+            "Dias": ["lunes , miercoles y viernes", "lunes , miercoles y viernes"],
+        }
+    )
+    with pd.ExcelWriter(tmp_path / "date.xlsx", engine="openpyxl") as writer:
+        empleados_df.to_excel(writer, sheet_name="Empleados", index=False)
+
+    # Solo cargamos registros de miercoles/viernes; jueves queda sin registro.
+    daily_df = pd.DataFrame(
+        {
+            "ID de persona": ["113", "113", "118"],
+            "Nombre": ["Pelliza Roque", "Pelliza Roque", "Zeller Lucas Ezequiel"],
+            "Fecha": [
+                pd.Timestamp("2026-05-20").date(),
+                pd.Timestamp("2026-05-22").date(),
+                pd.Timestamp("2026-05-22").date(),
+            ],
+            "Departamento": ["A", "A", "A"],
+            "Estado": ["Normal", "Normal", "Normal"],
+            "Tramos trabajados": ["07:30 - 18:00", "07:30 - 18:00", "07:30 - 12:00"],
+            "Minutos reales": [540, 540, 270],
+            "Minutos redondeados": [540, 540, 270],
+            "Minutos extra": [0, 0, 0],
+            "Horas extra": ["00:00", "00:00", "00:00"],
+            "Horas totales": ["09:00", "09:00", "04:30"],
+        }
+    )
+    monthly_df = pd.DataFrame(
+        columns=[
+            "ID de persona",
+            "Nombre",
+            "Dias trabajados",
+            "Minutos totales",
+            "Minutos extra",
+            "Horas extra",
+            "Horas totales",
+        ]
+    )
+    inconsistencies_df = pd.DataFrame(
+        columns=["ID de persona", "Nombre", "Fecha", "Tipo de inconsistencia", "Detalle"]
+    )
+
+    output = tmp_path / "reporte_hs_riorda_ausente_general.xlsx"
+    export_report(output, daily_df, monthly_df, inconsistencies_df)
+
+    wb = load_workbook(output)
+    ws = wb["hs-riorda"]
+    headers = [ws.cell(row=1, column=col).value for col in range(1, ws.max_column + 1)]
+    header_to_idx = {str(h): idx + 1 for idx, h in enumerate(headers)}
+    pelliza_col = header_to_idx["113 Pelliza Roque"]
+    zeller_col = header_to_idx["118 Zeller Lucas Ezequiel"]
+
+    row_2026_05_21 = None
+    for row_idx in range(2, ws.max_row + 1):
+        if "2026-05-21" in str(ws.cell(row=row_idx, column=1).value):
+            row_2026_05_21 = row_idx
+            break
+    assert row_2026_05_21 is not None
+
+    # Pelliza (no Zeller): jueves sin registro debe ir Ausente 0.00 en rojo.
+    assert ws.cell(row=row_2026_05_21, column=pelliza_col).value == 0
+    assert _rgb(ws.cell(row=row_2026_05_21, column=pelliza_col)).endswith("EF9A9A")
+    # Zeller: jueves sin registro sigue en blanco.
+    assert ws.cell(row=row_2026_05_21, column=zeller_col).value in ("", None)
+
+
+def test_hs_riorda_hides_zeller_non_working_days_even_with_absent_record(tmp_path: Path) -> None:
+    empleados_df = pd.DataFrame(
+        {
+            "Id": ["118"],
+            "Nombre": ["Zeller Lucas Ezequiel"],
+            "horario ingreso Mañana": ["07:30:00"],
+            "Horario salida Mañana": ["12:00:00"],
+            "Horario Ingreso Tarde": [None],
+            "Horario Salida Tarde": [None],
+            "Horario corrido": ["SI"],
+            "Dias": ["lunes , miercoles y viernes"],
+        }
+    )
+    with pd.ExcelWriter(tmp_path / "date.xlsx", engine="openpyxl") as writer:
+        empleados_df.to_excel(writer, sheet_name="Empleados", index=False)
+
+    # Simula que Diario trae un Ausente en jueves para Zeller.
+    daily_df = pd.DataFrame(
+        {
+            "ID de persona": ["118", "118"],
+            "Nombre": ["Zeller Lucas Ezequiel", "Zeller Lucas Ezequiel"],
+            "Fecha": [pd.Timestamp("2026-05-21").date(), pd.Timestamp("2026-05-22").date()],
+            "Departamento": ["A", "A"],
+            "Estado": ["Ausente", "Normal"],
+            "Tramos trabajados": ["", "07:30 - 12:00"],
+            "Minutos reales": [0, 270],
+            "Minutos redondeados": [0, 270],
+            "Minutos extra": [0, 0],
+            "Horas extra": ["00:00", "00:00"],
+            "Horas totales": ["00:00", "04:30"],
+        }
+    )
+    monthly_df = pd.DataFrame(
+        columns=[
+            "ID de persona",
+            "Nombre",
+            "Dias trabajados",
+            "Minutos totales",
+            "Minutos extra",
+            "Horas extra",
+            "Horas totales",
+        ]
+    )
+    inconsistencies_df = pd.DataFrame(
+        columns=["ID de persona", "Nombre", "Fecha", "Tipo de inconsistencia", "Detalle"]
+    )
+
+    output = tmp_path / "reporte_hs_riorda_zeller_no_jueves.xlsx"
+    export_report(output, daily_df, monthly_df, inconsistencies_df)
+
+    wb = load_workbook(output)
+    ws = wb["hs-riorda"]
+    headers = [ws.cell(row=1, column=col).value for col in range(1, ws.max_column + 1)]
+    header_to_idx = {str(h): idx + 1 for idx, h in enumerate(headers)}
+    zeller_col = header_to_idx["118 Zeller Lucas Ezequiel"]
+
+    thursday_row = None
+    for row_idx in range(2, ws.max_row + 1):
+        if "2026-05-21" in str(ws.cell(row=row_idx, column=1).value):
+            thursday_row = row_idx
+            break
+
+    assert thursday_row is not None
+    assert ws.cell(row=thursday_row, column=zeller_col).value in ("", None)
+
+
 def test_hs_riorda_total_rows_have_stronger_borders(tmp_path: Path) -> None:
     daily_df = pd.DataFrame(
         {
@@ -1054,17 +1270,17 @@ def test_hs_riorda_highlights_below_daily_target_in_orange(tmp_path: Path) -> No
     dates = [pd.Timestamp("2026-05-11").date(), pd.Timestamp("2026-05-12").date()]
     daily_df = pd.DataFrame(
         {
-            "ID de persona": ["93", "93"],
-            "Nombre": ["Suarez Elina", "Suarez Elina"],
+            "ID de persona": ["118", "118"],
+            "Nombre": ["Zeller Lucas Ezequiel", "Zeller Lucas Ezequiel"],
             "Fecha": dates,
             "Departamento": ["A", "A"],
             "Estado": ["Normal", "Normal"],
-            "Tramos trabajados": ["08:00 - 13:00", "08:00 - 14:00"],  # 5h y 6h (objetivo 6)
-            "Minutos reales": [300, 360],
-            "Minutos redondeados": [300, 360],
+            "Tramos trabajados": ["08:00 - 12:00", "07:30 - 12:00"],  # 4h y 4.5h (objetivo 4.5)
+            "Minutos reales": [240, 270],
+            "Minutos redondeados": [240, 270],
             "Minutos extra": [0, 0],
             "Horas extra": ["00:00", "00:00"],
-            "Horas totales": ["05:00", "06:00"],
+            "Horas totales": ["04:00", "04:30"],
         }
     )
     monthly_df = pd.DataFrame(
@@ -1089,7 +1305,7 @@ def test_hs_riorda_highlights_below_daily_target_in_orange(tmp_path: Path) -> No
     ws = wb["hs-riorda"]
     headers = [ws.cell(row=1, column=col).value for col in range(1, ws.max_column + 1)]
     header_to_idx = {str(h): idx + 1 for idx, h in enumerate(headers)}
-    employee_col = header_to_idx["93 Suarez Elina"]
+    employee_col = header_to_idx["118 Zeller Lucas Ezequiel"]
 
     monday_row = None
     tuesday_row = None
@@ -1114,18 +1330,18 @@ def test_hs_riorda_highlights_below_daily_target_in_orange(tmp_path: Path) -> No
 def test_hs_riorda_does_not_discount_system_extra_for_capped_profiles(tmp_path: Path) -> None:
     daily_df = pd.DataFrame(
         {
-            "ID de persona": ["93", "99"],
-            "Nombre": ["Suarez Elina", "Fernandez Lara"],
-            "Fecha": [pd.Timestamp("2026-05-12").date(), pd.Timestamp("2026-05-12").date()],
+            "ID de persona": ["118", "119"],
+            "Nombre": ["Zeller Lucas Ezequiel", "Lencina Rocio Pilar"],
+            "Fecha": [pd.Timestamp("2026-05-13").date(), pd.Timestamp("2026-05-13").date()],
             "Departamento": ["A", "A"],
             "Estado": ["Normal", "Normal"],
-            "Tramos trabajados": ["07:00 - 13:00", "07:00 - 14:00"],
-            "Minutos reales": [360, 420],
-            "Minutos redondeados": [360, 420],
+            "Tramos trabajados": ["07:00 - 12:00", "07:00 - 15:00"],
+            "Minutos reales": [300, 480],
+            "Minutos redondeados": [300, 480],
             # El sistema base marca parte como extra, pero en hs-riorda deben contar normales hasta el tope.
             "Minutos extra": [60, 120],
             "Horas extra": ["01:00", "02:00"],
-            "Horas totales": ["06:00", "07:00"],
+            "Horas totales": ["05:00", "08:00"],
         }
     )
     monthly_df = pd.DataFrame(
@@ -1150,34 +1366,34 @@ def test_hs_riorda_does_not_discount_system_extra_for_capped_profiles(tmp_path: 
     ws = wb["hs-riorda"]
     headers = [ws.cell(row=1, column=col).value for col in range(1, ws.max_column + 1)]
     header_to_idx = {str(h): idx + 1 for idx, h in enumerate(headers)}
-    elina_col = header_to_idx["93 Suarez Elina"]
-    lara_col = header_to_idx["99 Fernandez Lara"]
+    zeller_col = header_to_idx["118 Zeller Lucas Ezequiel"]
+    rocio_col = header_to_idx["119 Lencina Rocio Pilar"]
 
-    tuesday_row = None
+    wednesday_row = None
     for row_idx in range(2, ws.max_row + 1):
-        if str(ws.cell(row=row_idx, column=2).value or "") == "Martes":
-            tuesday_row = row_idx
+        if str(ws.cell(row=row_idx, column=2).value or "") == "Miercoles":
+            wednesday_row = row_idx
             break
-    assert tuesday_row is not None
+    assert wednesday_row is not None
 
-    assert ws.cell(row=tuesday_row, column=elina_col).value == 6
-    assert ws.cell(row=tuesday_row, column=lara_col).value == 7
+    assert ws.cell(row=wednesday_row, column=zeller_col).value == 4.5
+    assert ws.cell(row=wednesday_row, column=rocio_col).value == 8
 
 
 def test_hs_riorda_preserves_status_colors_when_not_below_target(tmp_path: Path) -> None:
     daily_df = pd.DataFrame(
         {
-            "ID de persona": ["93"],
-            "Nombre": ["Suarez Elina"],
-            "Fecha": [pd.Timestamp("2026-05-12").date()],
+            "ID de persona": ["118"],
+            "Nombre": ["Zeller Lucas Ezequiel"],
+            "Fecha": [pd.Timestamp("2026-05-13").date()],
             "Departamento": ["A"],
             "Estado": ["Feriado"],
-            "Tramos trabajados": ["08:00 - 14:00"],
-            "Minutos reales": [360],
-            "Minutos redondeados": [360],
+            "Tramos trabajados": ["07:30 - 12:00"],
+            "Minutos reales": [270],
+            "Minutos redondeados": [270],
             "Minutos extra": [0],
             "Horas extra": ["00:00"],
-            "Horas totales": ["06:00"],
+            "Horas totales": ["04:30"],
         }
     )
     monthly_df = pd.DataFrame(
@@ -1202,16 +1418,16 @@ def test_hs_riorda_preserves_status_colors_when_not_below_target(tmp_path: Path)
     ws = wb["hs-riorda"]
     headers = [ws.cell(row=1, column=col).value for col in range(1, ws.max_column + 1)]
     header_to_idx = {str(h): idx + 1 for idx, h in enumerate(headers)}
-    elina_col = header_to_idx["93 Suarez Elina"]
+    zeller_col = header_to_idx["118 Zeller Lucas Ezequiel"]
 
-    tuesday_row = None
+    wednesday_row = None
     for row_idx in range(2, ws.max_row + 1):
-        if str(ws.cell(row=row_idx, column=2).value or "") == "Martes":
-            tuesday_row = row_idx
+        if str(ws.cell(row=row_idx, column=2).value or "") == "Miercoles":
+            wednesday_row = row_idx
             break
-    assert tuesday_row is not None
+    assert wednesday_row is not None
 
-    cell = ws.cell(row=tuesday_row, column=elina_col)
+    cell = ws.cell(row=wednesday_row, column=zeller_col)
     rgb = str(getattr(getattr(cell.fill, "fgColor", None), "rgb", "") or "").upper()
     assert rgb.endswith("A9DF8F")
 
@@ -1219,8 +1435,8 @@ def test_hs_riorda_preserves_status_colors_when_not_below_target(tmp_path: Path)
 def test_hs_riorda_keeps_exception_status_color_even_if_below_target(tmp_path: Path) -> None:
     daily_df = pd.DataFrame(
         {
-            "ID de persona": ["93", "99"],
-            "Nombre": ["Suarez Elina", "Fernandez Lara"],
+            "ID de persona": ["118", "119"],
+            "Nombre": ["Zeller Lucas Ezequiel", "Lencina Rocio Pilar"],
             "Fecha": [pd.Timestamp("2026-05-13").date(), pd.Timestamp("2026-05-13").date()],
             "Departamento": ["A", "A"],
             "Estado": ["Vacaciones", "Accidente de trabajo"],
@@ -1254,8 +1470,8 @@ def test_hs_riorda_keeps_exception_status_color_even_if_below_target(tmp_path: P
     ws = wb["hs-riorda"]
     headers = [ws.cell(row=1, column=col).value for col in range(1, ws.max_column + 1)]
     header_to_idx = {str(h): idx + 1 for idx, h in enumerate(headers)}
-    elina_col = header_to_idx["93 Suarez Elina"]
-    lara_col = header_to_idx["99 Fernandez Lara"]
+    zeller_col = header_to_idx["118 Zeller Lucas Ezequiel"]
+    rocio_col = header_to_idx["119 Lencina Rocio Pilar"]
 
     wednesday_row = None
     for row_idx in range(2, ws.max_row + 1):
@@ -1264,13 +1480,13 @@ def test_hs_riorda_keeps_exception_status_color_even_if_below_target(tmp_path: P
             break
     assert wednesday_row is not None
 
-    elina_rgb = str(
-        getattr(getattr(ws.cell(row=wednesday_row, column=elina_col).fill, "fgColor", None), "rgb", "") or ""
+    zeller_rgb = str(
+        getattr(getattr(ws.cell(row=wednesday_row, column=zeller_col).fill, "fgColor", None), "rgb", "") or ""
     ).upper()
-    lara_rgb = str(
-        getattr(getattr(ws.cell(row=wednesday_row, column=lara_col).fill, "fgColor", None), "rgb", "") or ""
+    rocio_rgb = str(
+        getattr(getattr(ws.cell(row=wednesday_row, column=rocio_col).fill, "fgColor", None), "rgb", "") or ""
     ).upper()
 
     # Vacaciones = amarillo, ART = violeta; no deben volverse naranja.
-    assert elina_rgb.endswith("FFF59D")
-    assert lara_rgb.endswith("8E24AA")
+    assert zeller_rgb.endswith("FFF59D")
+    assert rocio_rgb.endswith("8E24AA")

@@ -6,6 +6,7 @@ import unicodedata
 import pandas as pd
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
+from services.schedule_info import ScheduleInfoError, load_schedule_profiles
 
 
 class ExportError(Exception):
@@ -127,9 +128,7 @@ HS_RIORDA_TARGET_EMPLOYEES_ORDERED = [
     ("83", "Zurvera Mirna"),
     ("117", "Mansilla Luis Gabriel"),
     ("119", "Lencina Rocio Pilar"),
-    ("93", "Suarez Elina"),
-    ("99", "Fernandez Lara"),
-    ("116", "Funes Leonardo"),
+    ("118", "Zeller Lucas Ezequiel"),
 ]
 HS_RIORDA_TARGET_NAMES = {name for _, name in HS_RIORDA_TARGET_EMPLOYEES_ORDERED}
 HS_RIORDA_MAX_NORMAL_HOURS_BY_ID = {
@@ -152,9 +151,11 @@ HS_RIORDA_MAX_NORMAL_HOURS_BY_ID = {
     "83": 7,
     "117": 9,
     "119": 8,
-    "93": 6,
-    "99": 7,
-    "116": 4,
+    "118": 4.5,
+}
+HS_RIORDA_ABSENCE_EXEMPT_EMPLOYEE_IDS = {"118"}
+HS_RIORDA_FIXED_WORKING_DAYS_BY_ID = {
+    "118": {0, 2, 4},  # lunes, miercoles, viernes
 }
 
 
@@ -256,6 +257,24 @@ def _load_employee_catalog(base_dir: Path) -> tuple[list[tuple[str, str, str]], 
     return result, loaded_from_file
 
 
+def _load_working_weekdays_catalog(base_dir: Path) -> dict[str, set[int]]:
+    candidates = [base_dir / "date.xlsx", base_dir / "info.xlsx"]
+    for path in candidates:
+        if not path.exists():
+            continue
+        try:
+            profiles = load_schedule_profiles(path)
+        except (ScheduleInfoError, Exception):
+            continue
+        if not profiles:
+            continue
+        return {
+            str(employee_id).strip(): set(values.get("working_weekdays", {0, 1, 2, 3, 4}))
+            for employee_id, values in profiles.items()
+        }
+    return {}
+
+
 def _build_incidencias_tables(
     daily_df: pd.DataFrame,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -334,6 +353,7 @@ def _build_liquidar_sheet(
     max_normal_hours_by_employee_id: dict[str, float] | None = None,
     ignore_tardiness_for_normal_hours: bool = False,
     include_weekly_common_rows: bool = False,
+    fill_missing_scheduled_as_absent: bool = False,
 ) -> tuple[pd.DataFrame, dict[tuple[int, int], str]]:
     cols_base = ["Fecha", "Dia", "Dia #"]
     if daily_df.empty:
@@ -407,6 +427,11 @@ def _build_liquidar_sheet(
             ]
         employees.sort(key=lambda item: (item[1].lower(), item[0]))
     employee_labels = [item[2] for item in employees]
+    working_days_by_employee = (
+        _load_working_weekdays_catalog(base_dir)
+        if fill_missing_scheduled_as_absent
+        else {}
+    )
 
     day_names = ["Lunes", "Martes", "Miercoles", "Jueves", "Viernes", "Sabado", "Domingo"]
     by_key: dict[tuple[pd.Timestamp, str], dict] = {}
@@ -473,11 +498,43 @@ def _build_liquidar_sheet(
         is_saturday = int(day.weekday()) == 5
         attendance_statuses = {"normal", "tarde", "tardanza", "domingo"}
         for emp_index, (emp_id, employee_name, label) in enumerate(employees, start=0):
+            weekday = int(day.weekday())
+            employee_working_days = working_days_by_employee.get(emp_id)
+            if emp_id in HS_RIORDA_FIXED_WORKING_DAYS_BY_ID:
+                # Refuerzo operativo: Zeller siempre usa L/Mi/V, incluso si
+                # el parseo de date.xlsx cae en un default amplio.
+                if employee_working_days is None or employee_working_days == {0, 1, 2, 3, 4}:
+                    employee_working_days = set(HS_RIORDA_FIXED_WORKING_DAYS_BY_ID[emp_id])
+            if employee_working_days is None:
+                employee_working_days = {0, 1, 2, 3, 4}
+
+            if (
+                fill_missing_scheduled_as_absent
+                and weekday < 5
+                and emp_id in HS_RIORDA_ABSENCE_EXEMPT_EMPLOYEE_IDS
+                and weekday not in employee_working_days
+            ):
+                # Zeller en martes/jueves: no mostrar registro ni ausencia.
+                row_data[label] = ""
+                continue
+
             rec = by_key.get((day, emp_id))
             if rec is None:
                 rec = by_name_key.get((day, _normalize_person_name(employee_name)))
             if rec is None:
-                row_data[label] = ""
+                should_mark_absent = False
+                if fill_missing_scheduled_as_absent and weekday < 5:
+                    if emp_id in HS_RIORDA_ABSENCE_EXEMPT_EMPLOYEE_IDS:
+                        # Excepcion operativa: Zeller solo ausente en sus dias laborables.
+                        should_mark_absent = weekday in employee_working_days
+                    else:
+                        # Resto del personal: sin registro en dia habil sale Ausente 0.00.
+                        should_mark_absent = True
+                if should_mark_absent:
+                    row_data[label] = 0.0
+                    cell_status_map[(excel_row, 4 + emp_index)] = "Ausente"
+                else:
+                    row_data[label] = ""
                 continue
             status = str(rec.get("Estado", "")).strip()
             status_norm = _normalize_status(status)
@@ -911,6 +968,7 @@ def export_report(
         max_normal_hours_by_employee_id=HS_RIORDA_MAX_NORMAL_HOURS_BY_ID,
         ignore_tardiness_for_normal_hours=True,
         include_weekly_common_rows=True,
+        fill_missing_scheduled_as_absent=True,
     )
     try:
         with pd.ExcelWriter(temp_output, engine="openpyxl") as writer:

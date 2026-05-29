@@ -48,6 +48,13 @@ def _clean_cell(value: object) -> str:
     return text
 
 
+def _clean_employee_id(value: object) -> str:
+    text = _clean_cell(value)
+    if text.endswith(".0") and text[:-2].isdigit():
+        return text[:-2]
+    return text
+
+
 def _column_match_score(column: str, aliases: list[str]) -> int:
     normalized = _normalize(column)
     best = 0
@@ -200,7 +207,7 @@ def load_hikvision_excel(file_path: str | Path) -> pd.DataFrame:
     mapping = detect_column_mapping(source_columns)
 
     canonical_df = pd.DataFrame()
-    canonical_df["employee_id"] = source_df[mapping["employee_id"]].map(_clean_cell)
+    canonical_df["employee_id"] = source_df[mapping["employee_id"]].map(_clean_employee_id)
     canonical_df["employee_name"] = source_df[mapping["employee_name"]].map(_clean_cell)
     canonical_df["department"] = (
         source_df[mapping["department"]].map(_clean_cell) if "department" in mapping else ""
