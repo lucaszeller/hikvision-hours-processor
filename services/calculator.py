@@ -966,10 +966,10 @@ def process_punches(
             is_flexible_attendance = str(employee_id).strip() in flexible_attendance_employee_ids
             if is_flexible_attendance:
                 overtime_minutes = 0
-            elif day_key in split_two_punch_days:
-                overtime_minutes = 0
             elif work_date.weekday() in {5, 6} or work_date.weekday() not in employee_days:
                 overtime_minutes = rounded_total
+            elif day_key in split_two_punch_days:
+                overtime_minutes = 0
             else:
                 scheduled_minutes = scheduled_minutes_by_employee.get(str(employee_id).strip())
                 if scheduled_minutes is None:
@@ -1057,8 +1057,21 @@ def process_punches(
                 },
             )
             row_data = day_rows.get(day_key)
-            exception_types_lower = [str(value).strip().lower() for value in (state.get("exception_types") or [])]
+            exception_types = [str(value).strip() for value in (state.get("exception_types") or []) if str(value).strip() != ""]
+            exception_types_lower = [value.lower() for value in exception_types]
             has_presente = "presente" in exception_types_lower
+            has_non_presente_exception = any(value != "presente" for value in exception_types_lower)
+            suppress_presente_by_saturday_exception = (
+                work_date.weekday() == 5 and has_presente and has_non_presente_exception
+            )
+            apply_presente = has_presente and not suppress_presente_by_saturday_exception
+            preferred_exception = exception_types[0] if exception_types else "Normal"
+            if suppress_presente_by_saturday_exception:
+                preferred_exception = next(
+                    (value for value in exception_types if value.strip().lower() != "presente"),
+                    preferred_exception,
+                )
+            saturday_has_exception = work_date.weekday() == 5 and bool(exception_types)
 
             if row_data is None:
                 if (
@@ -1070,7 +1083,7 @@ def process_punches(
                 departments = sorted([d for d in state["departments"] if str(d).strip() != ""])
                 paid_exception = bool(state.get("paid_exception"))
                 scheduled_minutes = scheduled_minutes_by_employee.get(str(employee_id).strip(), 0)
-                if has_presente:
+                if apply_presente:
                     paid_minutes = int(scheduled_minutes) if int(scheduled_minutes) > 0 else 0
                 else:
                     paid_minutes = int(scheduled_minutes) if paid_exception and int(scheduled_minutes) > 0 else 0
@@ -1086,7 +1099,7 @@ def process_punches(
                     "Horas extra": "00:00",
                     "Horas totales": _minutes_to_hhmm(paid_minutes),
                 }
-            elif has_presente:
+            elif apply_presente:
                 # Regla: si hay PRESENTE en date.xlsx, ignora fichadas reales del dia.
                 scheduled_minutes = int(scheduled_minutes_by_employee.get(str(employee_id).strip(), 0) or 0)
                 row_data = {
@@ -1101,13 +1114,52 @@ def process_punches(
                     "Horas extra": "00:00",
                     "Horas totales": _minutes_to_hhmm(scheduled_minutes),
                 }
+            elif suppress_presente_by_saturday_exception:
+                # Sabado con excepcion real en date.xlsx: ignora fichadas y procesa por excepcion.
+                departments = sorted([d for d in state["departments"] if str(d).strip() != ""])
+                if not departments and row_data is not None:
+                    departments = [str(row_data.get("Departamento", "")).strip()]
+                paid_exception = bool(state.get("paid_exception"))
+                scheduled_minutes = int(scheduled_minutes_by_employee.get(str(employee_id).strip(), 0) or 0)
+                paid_minutes = scheduled_minutes if paid_exception and scheduled_minutes > 0 else 0
+                row_data = {
+                    "ID de persona": employee_id,
+                    "Nombre": employee_name,
+                    "Fecha": work_date,
+                    "Departamento": " / ".join([d for d in departments if d]),
+                    "Tramos trabajados": "",
+                    "Minutos reales": paid_minutes,
+                    "Minutos redondeados": paid_minutes,
+                    "Minutos extra": 0,
+                    "Horas extra": "00:00",
+                    "Horas totales": _minutes_to_hhmm(paid_minutes),
+                }
+            if saturday_has_exception:
+                departments = sorted([d for d in state["departments"] if str(d).strip() != ""])
+                if not departments and row_data is not None:
+                    departments = [str(row_data.get("Departamento", "")).strip()]
+                row_data = {
+                    "ID de persona": employee_id,
+                    "Nombre": employee_name,
+                    "Fecha": work_date,
+                    "Departamento": " / ".join([d for d in departments if d]),
+                    "Tramos trabajados": "",
+                    "Minutos reales": 0,
+                    "Minutos redondeados": 0,
+                    "Minutos extra": 0,
+                    "Horas extra": "00:00",
+                    "Horas totales": "00:00",
+                    "Estado": preferred_exception.title(),
+                }
+                grouped_rows.append(row_data)
+                continue
 
             worked_minutes = int(row_data.get("Minutos redondeados", 0))
             if worked_minutes > 0:
-                if bool(state.get("paid_exception")) and (state.get("exception_types") or []) and str(
+                if bool(state.get("paid_exception")) and exception_types and str(
                     row_data.get("Tramos trabajados", "")
                 ).strip() == "":
-                    status = str((state.get("exception_types") or ["Normal"])[0]).strip().title()
+                    status = preferred_exception.title()
                     row_data["Estado"] = status
                     grouped_rows.append(row_data)
                     continue
@@ -1133,9 +1185,8 @@ def process_punches(
                     else:
                         status = "Tarde" if bool(state.get("late")) else "Normal"
             else:
-                exception_types = state.get("exception_types") or []
                 if exception_types:
-                    status = str(exception_types[0]).strip().title()
+                    status = preferred_exception.title()
                 elif bool(state.get("absent")) and not is_flexible_attendance:
                     status = "Ausente"
                 elif bool(state.get("late")) and not is_flexible_attendance:

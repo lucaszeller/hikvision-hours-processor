@@ -314,9 +314,24 @@ def _build_liquidar_sheet(
 
     min_day = working["_fecha"].min().normalize()
     max_day = working["_fecha"].max().normalize()
+    attendance_statuses = {"normal", "tarde", "tardanza"}
+    saturday_rows = working.loc[working["_fecha"].dt.weekday == 5].copy()
+    saturday_rows["_is_attendance"] = False
+    if not saturday_rows.empty:
+        saturday_rows["_estado_norm"] = saturday_rows["Estado"].map(_normalize_status)
+        saturday_rows["_has_punch"] = (
+            saturday_rows["Tramos trabajados"].fillna("").astype(str).str.strip() != ""
+        )
+        saturday_rows["_has_minutes"] = pd.to_numeric(
+            saturday_rows["Minutos redondeados"], errors="coerce"
+        ).fillna(0).astype(int) > 0
+        saturday_rows["_is_attendance"] = (
+            saturday_rows["_estado_norm"].isin(attendance_statuses)
+            & (saturday_rows["_has_punch"] | saturday_rows["_has_minutes"])
+        )
     worked_saturdays = {
         day.normalize()
-        for day in working.loc[working["_fecha"].dt.weekday == 5, "_fecha"]
+        for day in saturday_rows.loc[saturday_rows["_is_attendance"], "_fecha"]
     }
     all_days = [
         day
@@ -344,19 +359,27 @@ def _build_liquidar_sheet(
             "Dia": day_names[int(day.weekday())],
             "Dia #": int(day.day),
         }
+        is_saturday = int(day.weekday()) == 5
+        attendance_statuses = {"normal", "tarde", "tardanza", "domingo"}
         for emp_index, (emp_id, _, label) in enumerate(employees, start=0):
             rec = by_key.get((day, emp_id))
             if rec is None:
                 row_data[label] = ""
                 continue
+            status = str(rec.get("Estado", "")).strip()
+            status_norm = _normalize_status(status)
+            if is_saturday and status_norm and status_norm not in attendance_statuses:
+                # Sabado con excepcion cargada: no liquidar horas para ese empleado ese dia.
+                row_data[label] = ""
+                continue
             total_minutes = int(pd.to_numeric(rec.get("Minutos redondeados", 0), errors="coerce") or 0)
             extra_minutes = int(pd.to_numeric(rec.get("Minutos extra", 0), errors="coerce") or 0)
             normal_minutes = max(0, total_minutes - extra_minutes)
-            row_data[label] = round(normal_minutes / 60, 2)
+            display_minutes = total_minutes if is_saturday else normal_minutes
+            row_data[label] = round(display_minutes / 60, 2)
             half = "q1" if int(day.day) <= 15 else "q2"
             totals_minutes_by_employee[emp_id][f"{half}_common"] += normal_minutes
             totals_minutes_by_employee[emp_id][f"{half}_extra"] += max(0, extra_minutes)
-            status = str(rec.get("Estado", "")).strip()
             # Employee cols start after A,B,C
             cell_status_map[(excel_row, 4 + emp_index)] = status
         rows.append(row_data)

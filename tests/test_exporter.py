@@ -377,6 +377,98 @@ def test_liquidar_includes_worked_saturday_rows(tmp_path: Path) -> None:
 
     dates = [str(ws.cell(row=row, column=1).value)[:10] for row in range(2, ws.max_row + 1)]
     assert "2026-05-09" in dates
+    saturday_row = None
+    for row in range(2, ws.max_row + 1):
+        if str(ws.cell(row=row, column=1).value)[:10] == "2026-05-09":
+            saturday_row = row
+            break
+    assert saturday_row is not None
+    assert ws.cell(row=saturday_row, column=4).value == 4
+
+
+def test_liquidar_saturday_exceptions_are_blank_per_employee(tmp_path: Path) -> None:
+    daily_df = pd.DataFrame(
+        {
+            "ID de persona": ["20", "30"],
+            "Nombre": ["Ana", "Luis"],
+            "Fecha": [pd.Timestamp("2026-05-23").date(), pd.Timestamp("2026-05-23").date()],
+            "Departamento": ["A", "B"],
+            "Estado": ["Normal", "Accidente de trabajo"],
+            "Tramos trabajados": ["07:30-11:30 [07:30-11:30]", ""],
+            "Minutos reales": [240, 0],
+            "Minutos redondeados": [240, 0],
+            "Minutos extra": [240, 0],
+            "Horas extra": ["04:00", "00:00"],
+            "Horas totales": ["04:00", "00:00"],
+        }
+    )
+    monthly_df = pd.DataFrame(
+        columns=[
+            "ID de persona",
+            "Nombre",
+            "Dias trabajados",
+            "Minutos totales",
+            "Minutos extra",
+            "Horas extra",
+            "Horas totales",
+        ]
+    )
+    inconsistencies_df = pd.DataFrame(
+        columns=["ID de persona", "Nombre", "Fecha", "Tipo de inconsistencia", "Detalle"]
+    )
+
+    output = tmp_path / "reporte_liquidar_sabado_excepciones.xlsx"
+    export_report(output, daily_df, monthly_df, inconsistencies_df)
+
+    wb = load_workbook(output)
+    ws = wb["Liquidar"]
+
+    assert str(ws["A2"].value)[:10] == "2026-05-23"
+    # 20 Ana -> asistio sabado, mostrar horas trabajadas.
+    assert ws["D2"].value == 4
+    # 30 Luis -> sabado con excepcion, se elimina de la liquidacion del dia.
+    assert ws["E2"].value in ("", None)
+
+
+def test_liquidar_skips_saturday_when_no_attendance_punches(tmp_path: Path) -> None:
+    daily_df = pd.DataFrame(
+        {
+            "ID de persona": ["20", "30"],
+            "Nombre": ["Ana", "Luis"],
+            "Fecha": [pd.Timestamp("2026-05-23").date(), pd.Timestamp("2026-05-23").date()],
+            "Departamento": ["A", "B"],
+            "Estado": ["Vacaciones", "Accidente de trabajo"],
+            "Tramos trabajados": ["", ""],
+            "Minutos reales": [0, 0],
+            "Minutos redondeados": [0, 0],
+            "Minutos extra": [0, 0],
+            "Horas extra": ["00:00", "00:00"],
+            "Horas totales": ["00:00", "00:00"],
+        }
+    )
+    monthly_df = pd.DataFrame(
+        columns=[
+            "ID de persona",
+            "Nombre",
+            "Dias trabajados",
+            "Minutos totales",
+            "Minutos extra",
+            "Horas extra",
+            "Horas totales",
+        ]
+    )
+    inconsistencies_df = pd.DataFrame(
+        columns=["ID de persona", "Nombre", "Fecha", "Tipo de inconsistencia", "Detalle"]
+    )
+
+    output = tmp_path / "reporte_liquidar_sabado_sin_fichadas.xlsx"
+    export_report(output, daily_df, monthly_df, inconsistencies_df)
+
+    wb = load_workbook(output)
+    ws = wb["Liquidar"]
+
+    dates = [str(ws.cell(row=row, column=1).value)[:10] for row in range(2, ws.max_row + 1)]
+    assert "2026-05-23" not in dates
 
 
 def test_liquidar_adds_quincena_common_and_extra_totals(tmp_path: Path) -> None:

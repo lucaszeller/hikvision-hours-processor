@@ -614,7 +614,7 @@ def test_saturday_split_schedule_uses_single_morning_shift() -> None:
     tramos = str(daily.iloc[0]["Tramos trabajados"])
     assert tramos == "07:41-11:36 [07:30-11:30]"
     assert int(daily.iloc[0]["Minutos redondeados"]) == 210
-    assert int(daily.iloc[0]["Minutos extra"]) == 0
+    assert int(daily.iloc[0]["Minutos extra"]) == 210
     assert inconsistencies.empty
 
 
@@ -882,6 +882,139 @@ def test_presente_exception_ignores_existing_punches_and_uses_scheduled_hours() 
     assert len(monthly) == 1
     assert int(monthly.iloc[0]["Minutos totales"]) == 300
     assert int(monthly.iloc[0]["Minutos extra"]) == 0
+
+
+def test_non_presente_exception_has_priority_over_presente_on_saturday() -> None:
+    df = pd.DataFrame(
+        {
+            "employee_id": ["20"],
+            "employee_name": ["Ana"],
+            "department": ["A"],
+            "schedule": [""],
+            "work_date_raw": ["2026-05-23"],  # sabado
+            "entry_time_raw": [""],
+            "exit_time_raw": [""],
+            "late_raw": [""],
+            "absent_raw": [""],
+        }
+    )
+
+    exceptions = [
+        WorkException(
+            employee_id="20",
+            exception_date=pd.Timestamp("2026-05-23").date(),
+            exception_type="Presente",
+            details="General",
+            paid_day=False,
+        ),
+        WorkException(
+            employee_id="20",
+            exception_date=pd.Timestamp("2026-05-23").date(),
+            exception_type="Accidente de trabajo",
+            details="ART",
+            paid_day=True,
+        ),
+    ]
+
+    daily, _, _ = process_punches(
+        df,
+        exceptions=exceptions,
+        scheduled_minutes_by_employee={"20": 240},
+        scheduled_start_minute_by_employee={"20": 450},
+    )
+
+    assert len(daily) == 1
+    row = daily.iloc[0]
+    assert row["Estado"] == "Accidente De Trabajo"
+    assert int(row["Minutos redondeados"]) == 0
+    assert row["Horas totales"] == "00:00"
+
+
+def test_saturday_non_presente_exception_ignores_punches_when_presente_exists() -> None:
+    df = pd.DataFrame(
+        {
+            "employee_id": ["20", "20"],
+            "employee_name": ["Ana", "Ana"],
+            "department": ["A", "A"],
+            "schedule": ["", ""],
+            "work_date_raw": ["2026-05-23", "2026-05-23"],  # sabado
+            "entry_time_raw": ["07:41", ""],
+            "exit_time_raw": ["", "11:36"],
+            "late_raw": ["", ""],
+            "absent_raw": ["", ""],
+        }
+    )
+
+    exceptions = [
+        WorkException(
+            employee_id="20",
+            exception_date=pd.Timestamp("2026-05-23").date(),
+            exception_type="Presente",
+            details="General",
+            paid_day=False,
+        ),
+        WorkException(
+            employee_id="20",
+            exception_date=pd.Timestamp("2026-05-23").date(),
+            exception_type="Accidente de trabajo",
+            details="ART",
+            paid_day=True,
+        ),
+    ]
+
+    daily, _, _ = process_punches(
+        df,
+        exceptions=exceptions,
+        scheduled_minutes_by_employee={"20": 240},
+        scheduled_start_minute_by_employee={"20": 450},
+    )
+
+    assert len(daily) == 1
+    row = daily.iloc[0]
+    assert row["Estado"] == "Accidente De Trabajo"
+    assert row["Tramos trabajados"] == ""
+    assert int(row["Minutos redondeados"]) == 0
+    assert int(row["Minutos extra"]) == 0
+
+
+def test_saturday_any_exception_zeroes_worked_hours() -> None:
+    df = pd.DataFrame(
+        {
+            "employee_id": ["20", "20"],
+            "employee_name": ["Ana", "Ana"],
+            "department": ["A", "A"],
+            "schedule": ["", ""],
+            "work_date_raw": ["2026-05-23", "2026-05-23"],  # sabado
+            "entry_time_raw": ["07:41", ""],
+            "exit_time_raw": ["", "11:36"],
+            "late_raw": ["", ""],
+            "absent_raw": ["", ""],
+        }
+    )
+
+    exceptions = [
+        WorkException(
+            employee_id="20",
+            exception_date=pd.Timestamp("2026-05-23").date(),
+            exception_type="Vacaciones",
+            details="Carga",
+            paid_day=True,
+        ),
+    ]
+
+    daily, _, _ = process_punches(
+        df,
+        exceptions=exceptions,
+        scheduled_minutes_by_employee={"20": 240},
+        scheduled_start_minute_by_employee={"20": 450},
+    )
+
+    assert len(daily) == 1
+    row = daily.iloc[0]
+    assert row["Estado"] == "Vacaciones"
+    assert int(row["Minutos redondeados"]) == 0
+    assert int(row["Minutos extra"]) == 0
+    assert row["Horas totales"] == "00:00"
 
 
 def test_flexible_attendance_employee_does_not_get_late_or_absent_status() -> None:
