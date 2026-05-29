@@ -48,6 +48,12 @@ THIN_BORDER = Border(
     top=Side(style="thin", color="D9D9D9"),
     bottom=Side(style="thin", color="D9D9D9"),
 )
+TOTAL_ROW_BORDER = Border(
+    left=Side(style="thin", color="0F172A"),
+    right=Side(style="thin", color="0F172A"),
+    top=Side(style="medium", color="0F172A"),
+    bottom=Side(style="medium", color="0F172A"),
+)
 
 SHEET_LAYOUTS = {
     "Diario": {
@@ -121,6 +127,9 @@ HS_RIORDA_TARGET_EMPLOYEES_ORDERED = [
     ("83", "Zurvera Mirna"),
     ("117", "Mansilla Luis Gabriel"),
     ("119", "Lencina Rocio Pilar"),
+    ("93", "Suarez Elina"),
+    ("99", "Fernandez Lara"),
+    ("116", "Funes Leonardo"),
 ]
 HS_RIORDA_TARGET_NAMES = {name for _, name in HS_RIORDA_TARGET_EMPLOYEES_ORDERED}
 HS_RIORDA_MAX_NORMAL_HOURS_BY_ID = {
@@ -143,6 +152,9 @@ HS_RIORDA_MAX_NORMAL_HOURS_BY_ID = {
     "83": 7,
     "117": 9,
     "119": 8,
+    "93": 6,
+    "99": 7,
+    "116": 4,
 }
 
 
@@ -321,6 +333,7 @@ def _build_liquidar_sheet(
     include_total_extra_row: bool = True,
     max_normal_hours_by_employee_id: dict[str, float] | None = None,
     ignore_tardiness_for_normal_hours: bool = False,
+    include_weekly_common_rows: bool = False,
 ) -> tuple[pd.DataFrame, dict[tuple[int, int], str]]:
     cols_base = ["Fecha", "Dia", "Dia #"]
     if daily_df.empty:
@@ -449,13 +462,14 @@ def _build_liquidar_sheet(
     }
     excel_row = 2  # header is row 1
 
-    def _append_day_row(day: pd.Timestamp) -> None:
+    def _append_day_row(day: pd.Timestamp) -> dict[str, int]:
         nonlocal excel_row
         row_data: dict[str, object] = {
             "Fecha": day.date(),
             "Dia": day_names[int(day.weekday())],
             "Dia #": int(day.day),
         }
+        day_common_minutes: dict[str, int] = {label: 0 for _, _, label in employees}
         is_saturday = int(day.weekday()) == 5
         attendance_statuses = {"normal", "tarde", "tardanza", "domingo"}
         for emp_index, (emp_id, employee_name, label) in enumerate(employees, start=0):
@@ -485,6 +499,7 @@ def _build_liquidar_sheet(
                 normal_minutes = cap_minutes
             display_minutes = total_minutes if is_saturday else normal_minutes
             row_data[label] = round(display_minutes / 60, 2)
+            day_common_minutes[label] = normal_minutes
             half = "q1" if int(day.day) <= 15 else "q2"
             totals_minutes_by_employee[label][f"{half}_common"] += normal_minutes
             totals_minutes_by_employee[label][f"{half}_extra"] += max(0, extra_minutes)
@@ -492,6 +507,7 @@ def _build_liquidar_sheet(
             cell_status_map[(excel_row, 4 + emp_index)] = status
         rows.append(row_data)
         excel_row += 1
+        return day_common_minutes
 
     def _hours(minutes: int) -> float:
         return round(max(0, int(minutes)) / 60, 2)
@@ -502,11 +518,33 @@ def _build_liquidar_sheet(
             row_data[emp_label] = _hours(totals_minutes_by_employee[emp_label][metric_key])
         return row_data
 
+    def _append_week_row(week_index: int, minutes_by_employee: dict[str, int]) -> None:
+        nonlocal excel_row
+        week_row: dict[str, object] = {"Fecha": "", "Dia": f"Total Semana {week_index} - Horas Comunes", "Dia #": ""}
+        for _, _, emp_label in employees:
+            week_row[emp_label] = _hours(minutes_by_employee[emp_label])
+        rows.append(week_row)
+        excel_row += 1
+
     q1_days = [day for day in all_days if int(day.day) <= 15]
     q2_days = [day for day in all_days if int(day.day) > 15]
+    week_index = 1
+    current_week_minutes = {label: 0 for _, _, label in employees}
 
     for day in q1_days:
-        _append_day_row(day)
+        day_minutes = _append_day_row(day)
+        if include_weekly_common_rows:
+            for label, value in day_minutes.items():
+                current_week_minutes[label] += value
+            if int(day.weekday()) == 4:
+                _append_week_row(week_index, current_week_minutes)
+                week_index += 1
+                current_week_minutes = {label: 0 for _, _, label in employees}
+
+    if include_weekly_common_rows and q1_days and any(current_week_minutes.values()):
+        _append_week_row(week_index, current_week_minutes)
+        week_index += 1
+        current_week_minutes = {label: 0 for _, _, label in employees}
 
     if q1_days:
         rows.append(_summary_row("1ra Quincena - Horas Comunes", "q1_common"))
@@ -516,7 +554,18 @@ def _build_liquidar_sheet(
             excel_row += 1
 
     for day in q2_days:
-        _append_day_row(day)
+        day_minutes = _append_day_row(day)
+        if include_weekly_common_rows:
+            for label, value in day_minutes.items():
+                current_week_minutes[label] += value
+            if int(day.weekday()) == 4:
+                _append_week_row(week_index, current_week_minutes)
+                week_index += 1
+                current_week_minutes = {label: 0 for _, _, label in employees}
+
+    if include_weekly_common_rows and q2_days and any(current_week_minutes.values()):
+        _append_week_row(week_index, current_week_minutes)
+        week_index += 1
 
     if q2_days:
         rows.append(_summary_row("2da Quincena - Horas Comunes", "q2_common"))
@@ -572,13 +621,20 @@ def _apply_liquidar_format(
         first_col_value = worksheet.cell(row=row_idx, column=1).value
         is_daily_row = pd.notna(pd.to_datetime(first_col_value, errors="coerce"))
         row_label = str(worksheet.cell(row=row_idx, column=2).value or "").strip().lower()
+        is_total_separator_row = (not is_daily_row) and (
+            "total semana" in row_label
+            or "quincena" in row_label
+            or "total mes" in row_label
+        )
         for col_idx in range(1, worksheet.max_column + 1):
             cell = worksheet.cell(row=row_idx, column=col_idx)
-            cell.border = THIN_BORDER
+            cell.border = TOTAL_ROW_BORDER if is_total_separator_row else THIN_BORDER
             if is_daily_row and row_idx % 2 == 0:
                 cell.fill = ALT_ROW_FILL
             if (not is_daily_row) and row_label:
-                if "horas extras" in row_label:
+                if "quincena" in row_label:
+                    cell.fill = PatternFill("solid", fgColor="E9D5FF")
+                elif "horas extras" in row_label:
                     cell.fill = PatternFill("solid", fgColor="FFD7B5")
                 elif "horas comunes" in row_label:
                     cell.fill = PatternFill("solid", fgColor="C7E0FF")
@@ -817,6 +873,7 @@ def export_report(
         include_total_extra_row=False,
         max_normal_hours_by_employee_id=HS_RIORDA_MAX_NORMAL_HOURS_BY_ID,
         ignore_tardiness_for_normal_hours=True,
+        include_weekly_common_rows=True,
     )
     try:
         with pd.ExcelWriter(temp_output, engine="openpyxl") as writer:

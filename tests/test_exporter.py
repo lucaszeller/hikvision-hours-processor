@@ -734,8 +734,8 @@ def test_export_creates_hs_riorda_sheet_with_only_target_employees(tmp_path: Pat
     assert "20 De Carli Gonzalo" in headers
     assert "67 Madera Adrián" in headers
     assert "30 ANA TEST" not in headers
-    # 3 columnas base + 19 empleados definidos.
-    assert ws.max_column == 22
+    # 3 columnas base + 22 empleados definidos.
+    assert ws.max_column == 25
 
 
 def test_hs_riorda_excludes_saturday_and_extra_summary_rows(tmp_path: Path) -> None:
@@ -943,3 +943,108 @@ def test_hs_riorda_never_uses_dark_green_fill(tmp_path: Path) -> None:
             cell = ws.cell(row=row_idx, column=col_idx)
             rgb = str(getattr(getattr(cell.fill, "fgColor", None), "rgb", "") or "").upper()
             assert not rgb.endswith("2E7D32")
+
+
+def test_hs_riorda_adds_weekly_totals_and_keeps_quincena_total(tmp_path: Path) -> None:
+    dates = pd.date_range("2026-05-04", "2026-05-15", freq="B")  # dos semanas completas lun-vie
+    daily_df = pd.DataFrame(
+        {
+            "ID de persona": ["20"] * len(dates),
+            "Nombre": ["De Carli Gonzalo"] * len(dates),
+            "Fecha": [d.date() for d in dates],
+            "Departamento": ["A"] * len(dates),
+            "Estado": ["Normal"] * len(dates),
+            "Tramos trabajados": ["07:30 - 18:00"] * len(dates),
+            "Minutos reales": [540] * len(dates),
+            "Minutos redondeados": [540] * len(dates),
+            "Minutos extra": [0] * len(dates),
+            "Horas extra": ["00:00"] * len(dates),
+            "Horas totales": ["09:00"] * len(dates),
+        }
+    )
+    monthly_df = pd.DataFrame(
+        columns=[
+            "ID de persona",
+            "Nombre",
+            "Dias trabajados",
+            "Minutos totales",
+            "Minutos extra",
+            "Horas extra",
+            "Horas totales",
+        ]
+    )
+    inconsistencies_df = pd.DataFrame(
+        columns=["ID de persona", "Nombre", "Fecha", "Tipo de inconsistencia", "Detalle"]
+    )
+
+    output = tmp_path / "reporte_hs_riorda_semanas.xlsx"
+    export_report(output, daily_df, monthly_df, inconsistencies_df)
+
+    wb = load_workbook(output)
+    ws = wb["hs-riorda"]
+    labels = [str(ws.cell(row=r, column=2).value or "") for r in range(2, ws.max_row + 1)]
+
+    assert "Total Semana 1 - Horas Comunes" in labels
+    assert "Total Semana 2 - Horas Comunes" in labels
+    assert "1ra Quincena - Horas Comunes" in labels
+
+    first_friday_idx = labels.index("Viernes")
+    week_1_idx = labels.index("Total Semana 1 - Horas Comunes")
+    second_friday_idx = labels.index("Viernes", first_friday_idx + 1)
+    week_2_idx = labels.index("Total Semana 2 - Horas Comunes")
+    q1_idx = labels.index("1ra Quincena - Horas Comunes")
+
+    # Debajo de cada viernes aparece el total semanal.
+    assert week_1_idx == first_friday_idx + 1
+    assert week_2_idx == second_friday_idx + 1
+    # Luego se mantiene el total de quincena.
+    assert q1_idx > week_2_idx
+
+
+def test_hs_riorda_total_rows_have_stronger_borders(tmp_path: Path) -> None:
+    daily_df = pd.DataFrame(
+        {
+            "ID de persona": ["20"] * 5,
+            "Nombre": ["De Carli Gonzalo"] * 5,
+            "Fecha": [d.date() for d in pd.date_range("2026-05-11", "2026-05-15", freq="B")],
+            "Departamento": ["A"] * 5,
+            "Estado": ["Normal"] * 5,
+            "Tramos trabajados": ["07:30 - 18:00"] * 5,
+            "Minutos reales": [540] * 5,
+            "Minutos redondeados": [540] * 5,
+            "Minutos extra": [0] * 5,
+            "Horas extra": ["00:00"] * 5,
+            "Horas totales": ["09:00"] * 5,
+        }
+    )
+    monthly_df = pd.DataFrame(
+        columns=[
+            "ID de persona",
+            "Nombre",
+            "Dias trabajados",
+            "Minutos totales",
+            "Minutos extra",
+            "Horas extra",
+            "Horas totales",
+        ]
+    )
+    inconsistencies_df = pd.DataFrame(
+        columns=["ID de persona", "Nombre", "Fecha", "Tipo de inconsistencia", "Detalle"]
+    )
+
+    output = tmp_path / "reporte_hs_riorda_bordes_totales.xlsx"
+    export_report(output, daily_df, monthly_df, inconsistencies_df)
+
+    wb = load_workbook(output)
+    ws = wb["hs-riorda"]
+
+    total_row = None
+    for row_idx in range(2, ws.max_row + 1):
+        if str(ws.cell(row=row_idx, column=2).value or "") == "Total Semana 1 - Horas Comunes":
+            total_row = row_idx
+            break
+    assert total_row is not None
+
+    cell = ws.cell(row=total_row, column=1)
+    assert cell.border.top.style == "medium"
+    assert cell.border.bottom.style == "medium"

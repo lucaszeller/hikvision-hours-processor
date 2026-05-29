@@ -5,7 +5,7 @@ import queue
 import sys
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import date as dt_date, datetime, timedelta
 import math
 from pathlib import Path
 import unicodedata
@@ -138,6 +138,7 @@ class HikvisionApp(ctk.CTk):
         self.exceptions_summary_label: ctk.CTkLabel | None = None
         self.open_date_button_report: ctk.CTkButton | None = None
         self.open_date_button_exceptions: ctk.CTkButton | None = None
+        self.download_study_button: ctk.CTkButton | None = None
         self.context_file_value: ctk.CTkLabel | None = None
         self.context_exceptions_value: ctk.CTkLabel | None = None
         self.context_manual_value: ctk.CTkLabel | None = None
@@ -843,6 +844,16 @@ class HikvisionApp(ctk.CTk):
         self._style_primary_button(self.open_button, height=36)
         self.open_button.grid(row=10, column=0, padx=20, pady=(0, 8), sticky="ew")
 
+        self.download_study_button = ctk.CTkButton(
+            sidebar,
+            text="Descargar reporte estudio",
+            height=36,
+            command=self.download_study_report,
+            state="disabled",
+        )
+        self._style_primary_button(self.download_study_button, height=36)
+        self.download_study_button.grid(row=11, column=0, padx=20, pady=(0, 8), sticky="ew")
+
         self.clear_button = ctk.CTkButton(
             sidebar,
             text="Limpiar bitacora",
@@ -850,15 +861,15 @@ class HikvisionApp(ctk.CTk):
             command=self.clear_log,
         )
         self._style_secondary_button(self.clear_button, height=36)
-        self.clear_button.grid(row=11, column=0, padx=20, pady=(0, 14), sticky="ew")
+        self.clear_button.grid(row=12, column=0, padx=20, pady=(0, 14), sticky="ew")
 
         self.progress = ctk.CTkProgressBar(sidebar, mode="determinate")
         self.progress.configure(progress_color=COLOR_PRIMARY, fg_color=("#DCEAF6", "#1F2937"))
-        self.progress.grid(row=12, column=0, padx=20, pady=(0, 8), sticky="ew")
+        self.progress.grid(row=13, column=0, padx=20, pady=(0, 8), sticky="ew")
         self.progress.set(0)
 
         self.progress_text = ctk.CTkLabel(sidebar, text="Progreso: 0%", text_color=COLOR_TEXT_MUTED, font=self.font_body)
-        self.progress_text.grid(row=13, column=0, padx=20, pady=(0, 4), sticky="w")
+        self.progress_text.grid(row=14, column=0, padx=20, pady=(0, 4), sticky="w")
 
         self.progress_step = ctk.CTkLabel(
             sidebar,
@@ -866,10 +877,10 @@ class HikvisionApp(ctk.CTk):
             text_color=COLOR_TEXT_MUTED,
             font=self.font_body,
         )
-        self.progress_step.grid(row=14, column=0, padx=20, pady=(0, 4), sticky="w")
+        self.progress_step.grid(row=15, column=0, padx=20, pady=(0, 4), sticky="w")
 
         self.elapsed_text = ctk.CTkLabel(sidebar, text="Tiempo: 00:00", text_color=COLOR_TEXT_MUTED, font=self.font_body)
-        self.elapsed_text.grid(row=15, column=0, padx=20, pady=(0, 10), sticky="w")
+        self.elapsed_text.grid(row=16, column=0, padx=20, pady=(0, 10), sticky="w")
 
         info = ctk.CTkLabel(
             sidebar,
@@ -878,7 +889,7 @@ class HikvisionApp(ctk.CTk):
             justify="left",
             font=self.font_body,
         )
-        info.grid(row=16, column=0, padx=20, pady=(0, 12), sticky="w")
+        info.grid(row=17, column=0, padx=20, pady=(0, 12), sticky="w")
 
         main = ctk.CTkFrame(
             page,
@@ -1453,6 +1464,10 @@ class HikvisionApp(ctk.CTk):
         self.select_button.configure(state="normal" if enabled else "disabled")
         self.process_button.configure(state="normal" if enabled and self.selected_file else "disabled")
         self.clear_button.configure(state="normal" if enabled else "disabled")
+        if self.download_study_button is not None:
+            self.download_study_button.configure(
+                state="normal" if enabled and self.output_file is not None else "disabled"
+            )
 
         self.select_exceptions_button.configure(state="normal" if enabled else "disabled")
         self.clear_exceptions_button.configure(state="normal" if enabled else "disabled")
@@ -2121,6 +2136,98 @@ class HikvisionApp(ctk.CTk):
         except Exception as exc:
             messagebox.showerror("Error", f"No se pudo abrir el archivo:\n{exc}")
 
+    def download_study_report(self) -> None:
+        if not self.output_file:
+            messagebox.showwarning("Atencion", "Primero genera un reporte.")
+            return
+        if not self.output_file.exists():
+            messagebox.showerror("Error", f"No se encontro el archivo:\n{self.output_file}")
+            return
+
+        default_name = f"{self.output_file.stem}_estudio.xlsx"
+        target_path = filedialog.asksaveasfilename(
+            title="Guardar reporte estudio",
+            defaultextension=".xlsx",
+            initialfile=default_name,
+            initialdir=str(self.output_file.parent),
+            filetypes=[("Excel", "*.xlsx")],
+        )
+        if not target_path:
+            return
+
+        try:
+            workbook = load_workbook(self.output_file)
+            target_sheet_name = None
+            for sheet_name in workbook.sheetnames:
+                if self._normalize_label(sheet_name) == self._normalize_label("hs-riorda"):
+                    target_sheet_name = sheet_name
+                    break
+            if target_sheet_name is None:
+                raise ValueError("No se encontro la hoja hs-riorda en el reporte generado.")
+
+            for sheet_name in list(workbook.sheetnames):
+                if sheet_name != target_sheet_name:
+                    workbook.remove(workbook[sheet_name])
+            self._apply_study_dynamic_formulas(workbook[target_sheet_name])
+            workbook.save(target_path)
+            self.log(f"Reporte estudio generado: {target_path}")
+            messagebox.showinfo("Reporte estudio", f"Archivo generado en:\n{target_path}")
+        except Exception as exc:
+            messagebox.showerror("Error", f"No se pudo generar el reporte estudio:\n{exc}")
+
+    def _apply_study_dynamic_formulas(self, worksheet) -> None:
+        def _is_daily_row(row_idx: int) -> bool:
+            value = worksheet.cell(row=row_idx, column=1).value
+            return isinstance(value, (datetime, dt_date))
+
+        def _label(row_idx: int) -> str:
+            return str(worksheet.cell(row=row_idx, column=2).value or "").strip().lower()
+
+        def _formula_for_rows(col_idx: int, rows: list[int]) -> str:
+            if not rows:
+                return "=0"
+            col = get_column_letter(col_idx)
+            terms = [f"{col}{row}" for row in rows]
+            return "=" + "+".join(terms)
+
+        employee_cols = list(range(4, worksheet.max_column + 1))
+        week_rows: list[int] = []
+        q1_rows: list[int] = []
+        q2_rows: list[int] = []
+        all_rows: list[int] = []
+
+        for row_idx in range(2, worksheet.max_row + 1):
+            if _is_daily_row(row_idx):
+                week_rows.append(row_idx)
+                all_rows.append(row_idx)
+                day_number = worksheet.cell(row=row_idx, column=3).value
+                try:
+                    day_int = int(day_number)
+                except Exception:
+                    day_int = 0
+                if 1 <= day_int <= 15:
+                    q1_rows.append(row_idx)
+                elif day_int > 15:
+                    q2_rows.append(row_idx)
+                continue
+
+            row_label = _label(row_idx)
+            if row_label.startswith("total semana") and "horas comunes" in row_label:
+                for col_idx in employee_cols:
+                    worksheet.cell(row=row_idx, column=col_idx).value = _formula_for_rows(col_idx, week_rows)
+                week_rows = []
+            elif row_label == "1ra quincena - horas comunes":
+                for col_idx in employee_cols:
+                    worksheet.cell(row=row_idx, column=col_idx).value = _formula_for_rows(col_idx, q1_rows)
+                week_rows = []
+            elif row_label == "2da quincena - horas comunes":
+                for col_idx in employee_cols:
+                    worksheet.cell(row=row_idx, column=col_idx).value = _formula_for_rows(col_idx, q2_rows)
+                week_rows = []
+            elif row_label == "total mes - horas comunes":
+                for col_idx in employee_cols:
+                    worksheet.cell(row=row_idx, column=col_idx).value = _formula_for_rows(col_idx, all_rows)
+
     def open_date_template_file(self) -> None:
         date_path = get_app_base_dir() / "date.xlsx"
         if not date_path.exists():
@@ -2146,6 +2253,8 @@ class HikvisionApp(ctk.CTk):
         self.selected_file = Path(filepath)
         self.output_file = None
         self.open_button.configure(state="disabled")
+        if self.download_study_button is not None:
+            self.download_study_button.configure(state="disabled")
         self._set_file_entry(str(self.selected_file))
         self._refresh_context_panel()
 
@@ -2231,6 +2340,8 @@ class HikvisionApp(ctk.CTk):
 
         self.output_file = None
         self.open_button.configure(state="disabled")
+        if self.download_study_button is not None:
+            self.download_study_button.configure(state="disabled")
         self._refresh_context_panel()
         self._set_status("procesando", "working")
         self._set_progress(2, "Preparando ejecucion...")
