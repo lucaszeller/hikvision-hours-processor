@@ -493,7 +493,9 @@ def _build_liquidar_sheet(
                 max_hours = max_normal_hours_by_employee_id.get(emp_id)
                 if max_hours is not None:
                     cap_minutes = int(round(float(max_hours) * 60))
-                    normal_minutes = min(normal_minutes, cap_minutes)
+                    # hs-riorda: considerar normales las horas reales hasta el tope diario,
+                    # sin descontar "extra" del sistema base para estos perfiles.
+                    normal_minutes = min(total_minutes, cap_minutes)
             if ignore_tardiness_for_normal_hours and status_norm in {"tarde", "tardanza"} and cap_minutes is not None:
                 # hs-riorda: no descontar por tardanza, usar jornada normal topeada por empleado.
                 normal_minutes = cap_minutes
@@ -596,6 +598,8 @@ def _apply_liquidar_format(
     worksheet,
     status_cells: dict[tuple[int, int], str],
     avoid_dark_green: bool = False,
+    highlight_below_daily_target: bool = False,
+    daily_target_hours_by_employee_id: dict[str, float] | None = None,
 ) -> None:
     headers = [cell.value for cell in worksheet[1]]
     header_to_idx = {str(value): idx + 1 for idx, value in enumerate(headers) if value is not None}
@@ -664,6 +668,40 @@ def _apply_liquidar_format(
             cell.fill = fill
         if font is not None:
             cell.font = font
+
+    if highlight_below_daily_target and daily_target_hours_by_employee_id:
+        highlight_fill = PatternFill("solid", fgColor="FFB74D")
+        for row_idx in range(2, worksheet.max_row + 1):
+            first_col_value = worksheet.cell(row=row_idx, column=1).value
+            is_daily_row = pd.notna(pd.to_datetime(first_col_value, errors="coerce"))
+            if not is_daily_row:
+                continue
+            for col_idx in range(4, worksheet.max_column + 1):
+                header = str(worksheet.cell(row=1, column=col_idx).value or "").strip()
+                employee_id = header.split(" ", 1)[0].strip() if header else ""
+                if not employee_id:
+                    continue
+                target_hours = daily_target_hours_by_employee_id.get(employee_id)
+                if target_hours is None:
+                    continue
+                cell = worksheet.cell(row=row_idx, column=col_idx)
+                raw_value = cell.value
+                if raw_value in ("", None):
+                    continue
+                try:
+                    worked_hours = float(raw_value)
+                except Exception:
+                    continue
+                if worked_hours + 1e-9 < float(target_hours):
+                    cell.fill = highlight_fill
+                    cell.font = Font(color="0F172A", bold=True)
+                else:
+                    # Sin alerta: deja el estilo base de la fila diaria.
+                    if row_idx % 2 == 0:
+                        cell.fill = ALT_ROW_FILL
+                    else:
+                        cell.fill = PatternFill(fill_type=None)
+                    cell.font = Font(color="0F172A", bold=False)
 
     _append_liquidar_legend(worksheet, avoid_dark_green=avoid_dark_green)
 
@@ -899,7 +937,13 @@ def export_report(
                 detail_header_row=detail_startrow + 1,
             )
             _apply_liquidar_format(workbook["Liquidar"], liquidar_status_cells)
-            _apply_liquidar_format(workbook[HS_RIORDA_SHEET], hs_riorda_status_cells, avoid_dark_green=True)
+            _apply_liquidar_format(
+                workbook[HS_RIORDA_SHEET],
+                hs_riorda_status_cells,
+                avoid_dark_green=True,
+                highlight_below_daily_target=True,
+                daily_target_hours_by_employee_id=HS_RIORDA_MAX_NORMAL_HOURS_BY_ID,
+            )
 
         temp_output.replace(output)
     except Exception as exc:

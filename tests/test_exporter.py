@@ -1048,3 +1048,117 @@ def test_hs_riorda_total_rows_have_stronger_borders(tmp_path: Path) -> None:
     cell = ws.cell(row=total_row, column=1)
     assert cell.border.top.style == "medium"
     assert cell.border.bottom.style == "medium"
+
+
+def test_hs_riorda_highlights_below_daily_target_in_orange(tmp_path: Path) -> None:
+    dates = [pd.Timestamp("2026-05-11").date(), pd.Timestamp("2026-05-12").date()]
+    daily_df = pd.DataFrame(
+        {
+            "ID de persona": ["93", "93"],
+            "Nombre": ["Suarez Elina", "Suarez Elina"],
+            "Fecha": dates,
+            "Departamento": ["A", "A"],
+            "Estado": ["Normal", "Normal"],
+            "Tramos trabajados": ["08:00 - 13:00", "08:00 - 14:00"],  # 5h y 6h (objetivo 6)
+            "Minutos reales": [300, 360],
+            "Minutos redondeados": [300, 360],
+            "Minutos extra": [0, 0],
+            "Horas extra": ["00:00", "00:00"],
+            "Horas totales": ["05:00", "06:00"],
+        }
+    )
+    monthly_df = pd.DataFrame(
+        columns=[
+            "ID de persona",
+            "Nombre",
+            "Dias trabajados",
+            "Minutos totales",
+            "Minutos extra",
+            "Horas extra",
+            "Horas totales",
+        ]
+    )
+    inconsistencies_df = pd.DataFrame(
+        columns=["ID de persona", "Nombre", "Fecha", "Tipo de inconsistencia", "Detalle"]
+    )
+
+    output = tmp_path / "reporte_hs_riorda_objetivo_diario.xlsx"
+    export_report(output, daily_df, monthly_df, inconsistencies_df)
+
+    wb = load_workbook(output)
+    ws = wb["hs-riorda"]
+    headers = [ws.cell(row=1, column=col).value for col in range(1, ws.max_column + 1)]
+    header_to_idx = {str(h): idx + 1 for idx, h in enumerate(headers)}
+    employee_col = header_to_idx["93 Suarez Elina"]
+
+    monday_row = None
+    tuesday_row = None
+    for row_idx in range(2, ws.max_row + 1):
+        label = str(ws.cell(row=row_idx, column=2).value or "")
+        if label == "Lunes":
+            monday_row = row_idx
+        if label == "Martes":
+            tuesday_row = row_idx
+    assert monday_row is not None
+    assert tuesday_row is not None
+
+    monday_cell = ws.cell(row=monday_row, column=employee_col)
+    monday_rgb = str(getattr(getattr(monday_cell.fill, "fgColor", None), "rgb", "") or "").upper()
+    assert monday_rgb.endswith("FFB74D")
+
+    tuesday_cell = ws.cell(row=tuesday_row, column=employee_col)
+    tuesday_rgb = str(getattr(getattr(tuesday_cell.fill, "fgColor", None), "rgb", "") or "").upper()
+    assert not tuesday_rgb.endswith("FFB74D")
+
+
+def test_hs_riorda_does_not_discount_system_extra_for_capped_profiles(tmp_path: Path) -> None:
+    daily_df = pd.DataFrame(
+        {
+            "ID de persona": ["93", "99"],
+            "Nombre": ["Suarez Elina", "Fernandez Lara"],
+            "Fecha": [pd.Timestamp("2026-05-12").date(), pd.Timestamp("2026-05-12").date()],
+            "Departamento": ["A", "A"],
+            "Estado": ["Normal", "Normal"],
+            "Tramos trabajados": ["07:00 - 13:00", "07:00 - 14:00"],
+            "Minutos reales": [360, 420],
+            "Minutos redondeados": [360, 420],
+            # El sistema base marca parte como extra, pero en hs-riorda deben contar normales hasta el tope.
+            "Minutos extra": [60, 120],
+            "Horas extra": ["01:00", "02:00"],
+            "Horas totales": ["06:00", "07:00"],
+        }
+    )
+    monthly_df = pd.DataFrame(
+        columns=[
+            "ID de persona",
+            "Nombre",
+            "Dias trabajados",
+            "Minutos totales",
+            "Minutos extra",
+            "Horas extra",
+            "Horas totales",
+        ]
+    )
+    inconsistencies_df = pd.DataFrame(
+        columns=["ID de persona", "Nombre", "Fecha", "Tipo de inconsistencia", "Detalle"]
+    )
+
+    output = tmp_path / "reporte_hs_riorda_topes_sin_descuento_extra.xlsx"
+    export_report(output, daily_df, monthly_df, inconsistencies_df)
+
+    wb = load_workbook(output)
+    ws = wb["hs-riorda"]
+    headers = [ws.cell(row=1, column=col).value for col in range(1, ws.max_column + 1)]
+    header_to_idx = {str(h): idx + 1 for idx, h in enumerate(headers)}
+    elina_col = header_to_idx["93 Suarez Elina"]
+    lara_col = header_to_idx["99 Fernandez Lara"]
+
+    tuesday_row = None
+    for row_idx in range(2, ws.max_row + 1):
+        if str(ws.cell(row=row_idx, column=2).value or "") == "Martes":
+            tuesday_row = row_idx
+            break
+    assert tuesday_row is not None
+
+    assert ws.cell(row=tuesday_row, column=elina_col).value == 6
+    assert ws.cell(row=tuesday_row, column=lara_col).value == 7
