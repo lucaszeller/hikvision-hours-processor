@@ -691,3 +691,255 @@ def test_export_creates_incidencias_sheet_with_summary_and_detail(tmp_path: Path
     assert ("20", "Tarde", "07:31 - 12:00") in details
     assert ("20", "Ausente", "") in details
     assert ("30", "Tardanza", "08:05 - 12:00") in details
+
+
+def test_export_creates_hs_riorda_sheet_with_only_target_employees(tmp_path: Path) -> None:
+    daily_df = pd.DataFrame(
+        {
+            "ID de persona": ["20", "30"],
+            "Nombre": ["DE CARLI GONZALO DAVID", "ANA TEST"],
+            "Fecha": [pd.Timestamp("2026-05-05").date(), pd.Timestamp("2026-05-05").date()],
+            "Departamento": ["A", "B"],
+            "Estado": ["Normal", "Normal"],
+            "Tramos trabajados": ["07:30 - 12:00", "08:00 - 12:00"],
+            "Minutos reales": [270, 240],
+            "Minutos redondeados": [270, 240],
+            "Minutos extra": [0, 0],
+            "Horas extra": ["00:00", "00:00"],
+            "Horas totales": ["04:30", "04:00"],
+        }
+    )
+    monthly_df = pd.DataFrame(
+        columns=[
+            "ID de persona",
+            "Nombre",
+            "Dias trabajados",
+            "Minutos totales",
+            "Minutos extra",
+            "Horas extra",
+            "Horas totales",
+        ]
+    )
+    inconsistencies_df = pd.DataFrame(
+        columns=["ID de persona", "Nombre", "Fecha", "Tipo de inconsistencia", "Detalle"]
+    )
+
+    output = tmp_path / "reporte_hs_riorda.xlsx"
+    export_report(output, daily_df, monthly_df, inconsistencies_df)
+
+    wb = load_workbook(output)
+    assert "hs-riorda" in wb.sheetnames
+    ws = wb["hs-riorda"]
+    headers = [ws.cell(row=1, column=col).value for col in range(1, ws.max_column + 1)]
+    assert "20 De Carli Gonzalo" in headers
+    assert "67 Madera Adrián" in headers
+    assert "30 ANA TEST" not in headers
+    # 3 columnas base + 19 empleados definidos.
+    assert ws.max_column == 22
+
+
+def test_hs_riorda_excludes_saturday_and_extra_summary_rows(tmp_path: Path) -> None:
+    daily_df = pd.DataFrame(
+        {
+            "ID de persona": ["20", "20"],
+            "Nombre": ["De Carli Gonzalo", "De Carli Gonzalo"],
+            "Fecha": [pd.Timestamp("2026-05-08").date(), pd.Timestamp("2026-05-09").date()],  # viernes y sabado
+            "Departamento": ["A", "A"],
+            "Estado": ["Normal", "Normal"],
+            "Tramos trabajados": ["07:30 - 12:00", "07:30 - 11:30"],
+            "Minutos reales": [270, 240],
+            "Minutos redondeados": [270, 240],
+            "Minutos extra": [0, 240],
+            "Horas extra": ["00:00", "04:00"],
+            "Horas totales": ["04:30", "04:00"],
+        }
+    )
+    monthly_df = pd.DataFrame(
+        columns=[
+            "ID de persona",
+            "Nombre",
+            "Dias trabajados",
+            "Minutos totales",
+            "Minutos extra",
+            "Horas extra",
+            "Horas totales",
+        ]
+    )
+    inconsistencies_df = pd.DataFrame(
+        columns=["ID de persona", "Nombre", "Fecha", "Tipo de inconsistencia", "Detalle"]
+    )
+
+    output = tmp_path / "reporte_hs_riorda_sin_sabados.xlsx"
+    export_report(output, daily_df, monthly_df, inconsistencies_df)
+
+    wb = load_workbook(output)
+    ws = wb["hs-riorda"]
+    rows = [
+        [ws.cell(row=r, column=c).value for c in range(1, ws.max_column + 1)]
+        for r in range(2, ws.max_row + 1)
+    ]
+    labels = [str(row[1] or "") for row in rows]
+
+    assert "Sabado" not in labels
+    assert "1ra Quincena - Horas Extras" not in labels
+    assert "2da Quincena - Horas Extras" not in labels
+    assert "Total Mes - Horas Extras" not in labels
+
+
+def test_hs_riorda_caps_normal_hours_by_employee(tmp_path: Path) -> None:
+    daily_df = pd.DataFrame(
+        {
+            "ID de persona": ["83", "119"],
+            "Nombre": ["Zurvera Mirna", "Lencina Rocio Pilar"],
+            "Fecha": [pd.Timestamp("2026-05-11").date(), pd.Timestamp("2026-05-11").date()],
+            "Departamento": ["A", "A"],
+            "Estado": ["Normal", "Normal"],
+            "Tramos trabajados": ["07:00 - 17:00", "07:00 - 16:00"],
+            "Minutos reales": [600, 540],
+            "Minutos redondeados": [600, 540],
+            "Minutos extra": [0, 0],
+            "Horas extra": ["00:00", "00:00"],
+            "Horas totales": ["10:00", "09:00"],
+        }
+    )
+    monthly_df = pd.DataFrame(
+        columns=[
+            "ID de persona",
+            "Nombre",
+            "Dias trabajados",
+            "Minutos totales",
+            "Minutos extra",
+            "Horas extra",
+            "Horas totales",
+        ]
+    )
+    inconsistencies_df = pd.DataFrame(
+        columns=["ID de persona", "Nombre", "Fecha", "Tipo de inconsistencia", "Detalle"]
+    )
+
+    output = tmp_path / "reporte_hs_riorda_topes.xlsx"
+    export_report(output, daily_df, monthly_df, inconsistencies_df)
+
+    wb = load_workbook(output)
+    ws = wb["hs-riorda"]
+    headers = [ws.cell(row=1, column=col).value for col in range(1, ws.max_column + 1)]
+    header_to_idx = {str(h): idx + 1 for idx, h in enumerate(headers)}
+
+    mirna_col = header_to_idx["83 Zurvera Mirna"]
+    rocio_col = header_to_idx["119 Lencina Rocio Pilar"]
+
+    monday_row = None
+    q1_total_row = None
+    month_total_row = None
+    for row_idx in range(2, ws.max_row + 1):
+        dia = str(ws.cell(row=row_idx, column=2).value or "")
+        if dia == "Lunes":
+            monday_row = row_idx
+        if dia == "1ra Quincena - Horas Comunes":
+            q1_total_row = row_idx
+        if dia == "Total Mes - Horas Comunes":
+            month_total_row = row_idx
+
+    assert monday_row is not None
+    assert q1_total_row is not None
+    assert month_total_row is not None
+
+    assert ws.cell(row=monday_row, column=mirna_col).value == 7
+    assert ws.cell(row=monday_row, column=rocio_col).value == 8
+    assert ws.cell(row=q1_total_row, column=mirna_col).value == 7
+    assert ws.cell(row=q1_total_row, column=rocio_col).value == 8
+    assert ws.cell(row=month_total_row, column=mirna_col).value == 7
+    assert ws.cell(row=month_total_row, column=rocio_col).value == 8
+
+
+def test_hs_riorda_ignores_tardiness_discount(tmp_path: Path) -> None:
+    daily_df = pd.DataFrame(
+        {
+            "ID de persona": ["20"],
+            "Nombre": ["De Carli Gonzalo"],
+            "Fecha": [pd.Timestamp("2026-05-11").date()],
+            "Departamento": ["A"],
+            "Estado": ["Tarde"],
+            "Tramos trabajados": ["07:31 - 18:00"],
+            "Minutos reales": [509],
+            "Minutos redondeados": [510],  # 8.5h para simular descuento por tardanza
+            "Minutos extra": [0],
+            "Horas extra": ["00:00"],
+            "Horas totales": ["08:30"],
+        }
+    )
+    monthly_df = pd.DataFrame(
+        columns=[
+            "ID de persona",
+            "Nombre",
+            "Dias trabajados",
+            "Minutos totales",
+            "Minutos extra",
+            "Horas extra",
+            "Horas totales",
+        ]
+    )
+    inconsistencies_df = pd.DataFrame(
+        columns=["ID de persona", "Nombre", "Fecha", "Tipo de inconsistencia", "Detalle"]
+    )
+
+    output = tmp_path / "reporte_hs_riorda_tardanza.xlsx"
+    export_report(output, daily_df, monthly_df, inconsistencies_df)
+
+    wb = load_workbook(output)
+    ws = wb["hs-riorda"]
+    headers = [ws.cell(row=1, column=col).value for col in range(1, ws.max_column + 1)]
+    header_to_idx = {str(h): idx + 1 for idx, h in enumerate(headers)}
+    employee_col = header_to_idx["20 De Carli Gonzalo"]
+
+    monday_row = None
+    for row_idx in range(2, ws.max_row + 1):
+        if str(ws.cell(row=row_idx, column=2).value or "") == "Lunes":
+            monday_row = row_idx
+            break
+    assert monday_row is not None
+    # No descuenta por tardanza en hs-riorda: queda jornada normal de 9h.
+    assert ws.cell(row=monday_row, column=employee_col).value == 9
+
+
+def test_hs_riorda_never_uses_dark_green_fill(tmp_path: Path) -> None:
+    daily_df = pd.DataFrame(
+        {
+            "ID de persona": ["20"],
+            "Nombre": ["De Carli Gonzalo"],
+            "Fecha": [pd.Timestamp("2026-05-12").date()],
+            "Departamento": ["A"],
+            "Estado": ["Tardanza"],
+            "Tramos trabajados": ["07:31 - 18:00"],
+            "Minutos reales": [509],
+            "Minutos redondeados": [510],
+            "Minutos extra": [0],
+            "Horas extra": ["00:00"],
+            "Horas totales": ["08:30"],
+        }
+    )
+    monthly_df = pd.DataFrame(
+        columns=[
+            "ID de persona",
+            "Nombre",
+            "Dias trabajados",
+            "Minutos totales",
+            "Minutos extra",
+            "Horas extra",
+            "Horas totales",
+        ]
+    )
+    inconsistencies_df = pd.DataFrame(
+        columns=["ID de persona", "Nombre", "Fecha", "Tipo de inconsistencia", "Detalle"]
+    )
+
+    output = tmp_path / "reporte_hs_riorda_sin_verde_oscuro.xlsx"
+    export_report(output, daily_df, monthly_df, inconsistencies_df)
+
+    wb = load_workbook(output)
+    ws = wb["hs-riorda"]
+    for row_idx in range(1, ws.max_row + 1):
+        for col_idx in range(1, ws.max_column + 1):
+            cell = ws.cell(row=row_idx, column=col_idx)
+            rgb = str(getattr(getattr(cell.fill, "fgColor", None), "rgb", "") or "").upper()
+            assert not rgb.endswith("2E7D32")

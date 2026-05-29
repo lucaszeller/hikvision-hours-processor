@@ -100,6 +100,50 @@ SHEET_LAYOUTS = {
 INCIDENCIAS_SHEET = "Incidencias"
 INCIDENCIAS_SUMMARY_COLUMNS = ["ID de persona", "Nombre", "Total tardanzas", "Total ausencias"]
 INCIDENCIAS_DETAIL_COLUMNS = ["ID de persona", "Nombre", "Fecha", "Estado", "Fichada"]
+HS_RIORDA_SHEET = "hs-riorda"
+HS_RIORDA_TARGET_EMPLOYEES_ORDERED = [
+    ("67", "Madera Adrián"),
+    ("113", "Pelliza Roque"),
+    ("52", "Mario Butto"),
+    ("20", "De Carli Gonzalo"),
+    ("51", "Quignard Fernando"),
+    ("96", "Stieven Emiliano"),
+    ("97", "Gomez Pablo"),
+    ("101", "Gimenez Joel"),
+    ("100", "Bressan Jorge"),
+    ("82", "Godoy Denis"),
+    ("109", "Acosta Renzo"),
+    ("108", "Bruno Daniel"),
+    ("105", "Moreno José Benjamin"),
+    ("43", "Vanegas Leandro"),
+    ("79", "Zarate Olivera Luis"),
+    ("111", "Borgognoni Tomás"),
+    ("83", "Zurvera Mirna"),
+    ("117", "Mansilla Luis Gabriel"),
+    ("119", "Lencina Rocio Pilar"),
+]
+HS_RIORDA_TARGET_NAMES = {name for _, name in HS_RIORDA_TARGET_EMPLOYEES_ORDERED}
+HS_RIORDA_MAX_NORMAL_HOURS_BY_ID = {
+    "67": 9,
+    "113": 9,
+    "52": 9,
+    "20": 9,
+    "51": 9,
+    "96": 9,
+    "97": 9,
+    "101": 9,
+    "100": 9,
+    "82": 9,
+    "109": 9,
+    "108": 9,
+    "105": 9,
+    "43": 9,
+    "79": 9,
+    "111": 9,
+    "83": 7,
+    "117": 9,
+    "119": 8,
+}
 
 
 def _sort_for_report(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
@@ -127,6 +171,11 @@ def _status_style(status_text: object) -> dict[str, object]:
         # Cualquier excepcion no mapeada explicitamente mantiene verde manzana por defecto.
         return STATUS_STYLES["feriado"]
     return STATUS_STYLES["normal"]
+
+
+def _normalize_person_name(value: object) -> str:
+    text = unicodedata.normalize("NFKD", str(value or "")).encode("ascii", "ignore").decode("ascii")
+    return " ".join(text.strip().lower().split())
 
 
 def _load_employee_catalog(base_dir: Path) -> tuple[list[tuple[str, str, str]], bool]:
@@ -264,6 +313,14 @@ def _build_incidencias_tables(
 def _build_liquidar_sheet(
     daily_df: pd.DataFrame,
     base_dir: Path,
+    allowed_employee_names: set[str] | None = None,
+    forced_employee_names: list[str] | None = None,
+    forced_employees: list[tuple[str, str]] | None = None,
+    include_saturdays_with_attendance: bool = True,
+    include_extra_summary_rows: bool = True,
+    include_total_extra_row: bool = True,
+    max_normal_hours_by_employee_id: dict[str, float] | None = None,
+    ignore_tardiness_for_normal_hours: bool = False,
 ) -> tuple[pd.DataFrame, dict[tuple[int, int], str]]:
     cols_base = ["Fecha", "Dia", "Dia #"]
     if daily_df.empty:
@@ -302,15 +359,53 @@ def _build_liquidar_sheet(
                 catalog_by_id[emp_id] = (emp_name, f"{emp_id} {emp_name}")
 
     employees = [(emp_id, name, label) for emp_id, (name, label) in catalog_by_id.items()]
-    employees.sort(key=lambda item: (item[1].lower(), item[0]))
+    if forced_employees:
+        forced_employees_rows: list[tuple[str, str, str]] = []
+        for employee_id, employee_name in forced_employees:
+            clean_id = _clean_id(employee_id)
+            clean_name = str(employee_name or "").strip()
+            label = f"{clean_id} {clean_name}".strip() if clean_id else clean_name
+            forced_employees_rows.append((clean_id, clean_name, label))
+        employees = forced_employees_rows
+    elif forced_employee_names:
+        name_to_id: dict[str, str] = {}
+        for emp_id, (emp_name, _) in catalog_by_id.items():
+            normalized = _normalize_person_name(emp_name)
+            if normalized and normalized not in name_to_id:
+                name_to_id[normalized] = emp_id
+        for emp_id, emp_name in from_daily.items():
+            normalized = _normalize_person_name(emp_name)
+            if normalized and normalized not in name_to_id:
+                name_to_id[normalized] = emp_id
+
+        forced_employees: list[tuple[str, str, str]] = []
+        for employee_name in forced_employee_names:
+            normalized = _normalize_person_name(employee_name)
+            employee_id = name_to_id.get(normalized, "")
+            label = f"{employee_id} {employee_name}".strip() if employee_id else employee_name
+            forced_employees.append((employee_id, employee_name, label))
+        employees = forced_employees
+    else:
+        if allowed_employee_names:
+            allowed_norm = {_normalize_person_name(name) for name in allowed_employee_names}
+            employees = [
+                item for item in employees
+                if _normalize_person_name(item[1]) in allowed_norm
+            ]
+        employees.sort(key=lambda item: (item[1].lower(), item[0]))
     employee_labels = [item[2] for item in employees]
 
     day_names = ["Lunes", "Martes", "Miercoles", "Jueves", "Viernes", "Sabado", "Domingo"]
     by_key: dict[tuple[pd.Timestamp, str], dict] = {}
+    by_name_key: dict[tuple[pd.Timestamp, str], dict] = {}
     for _, row in working.iterrows():
         day = row["_fecha"].normalize()
         emp_id = _clean_id(row["ID de persona"])
+        emp_name = str(row.get("Nombre", "")).strip()
         by_key[(day, emp_id)] = row
+        normalized_name = _normalize_person_name(emp_name)
+        if normalized_name:
+            by_name_key[(day, normalized_name)] = row
 
     min_day = working["_fecha"].min().normalize()
     max_day = working["_fecha"].max().normalize()
@@ -329,10 +424,12 @@ def _build_liquidar_sheet(
             saturday_rows["_estado_norm"].isin(attendance_statuses)
             & (saturday_rows["_has_punch"] | saturday_rows["_has_minutes"])
         )
-    worked_saturdays = {
-        day.normalize()
-        for day in saturday_rows.loc[saturday_rows["_is_attendance"], "_fecha"]
-    }
+    worked_saturdays = set()
+    if include_saturdays_with_attendance:
+        worked_saturdays = {
+            day.normalize()
+            for day in saturday_rows.loc[saturday_rows["_is_attendance"], "_fecha"]
+        }
     all_days = [
         day
         for day in pd.date_range(min_day, max_day, freq="D")
@@ -342,13 +439,13 @@ def _build_liquidar_sheet(
     rows: list[dict[str, object]] = []
     cell_status_map: dict[tuple[int, int], str] = {}
     totals_minutes_by_employee: dict[str, dict[str, int]] = {
-        emp_id: {
+        label: {
             "q1_common": 0,
             "q1_extra": 0,
             "q2_common": 0,
             "q2_extra": 0,
         }
-        for emp_id, _, _ in employees
+        for _, _, label in employees
     }
     excel_row = 2  # header is row 1
 
@@ -361,8 +458,10 @@ def _build_liquidar_sheet(
         }
         is_saturday = int(day.weekday()) == 5
         attendance_statuses = {"normal", "tarde", "tardanza", "domingo"}
-        for emp_index, (emp_id, _, label) in enumerate(employees, start=0):
+        for emp_index, (emp_id, employee_name, label) in enumerate(employees, start=0):
             rec = by_key.get((day, emp_id))
+            if rec is None:
+                rec = by_name_key.get((day, _normalize_person_name(employee_name)))
             if rec is None:
                 row_data[label] = ""
                 continue
@@ -375,11 +474,20 @@ def _build_liquidar_sheet(
             total_minutes = int(pd.to_numeric(rec.get("Minutos redondeados", 0), errors="coerce") or 0)
             extra_minutes = int(pd.to_numeric(rec.get("Minutos extra", 0), errors="coerce") or 0)
             normal_minutes = max(0, total_minutes - extra_minutes)
+            cap_minutes = None
+            if max_normal_hours_by_employee_id:
+                max_hours = max_normal_hours_by_employee_id.get(emp_id)
+                if max_hours is not None:
+                    cap_minutes = int(round(float(max_hours) * 60))
+                    normal_minutes = min(normal_minutes, cap_minutes)
+            if ignore_tardiness_for_normal_hours and status_norm in {"tarde", "tardanza"} and cap_minutes is not None:
+                # hs-riorda: no descontar por tardanza, usar jornada normal topeada por empleado.
+                normal_minutes = cap_minutes
             display_minutes = total_minutes if is_saturday else normal_minutes
             row_data[label] = round(display_minutes / 60, 2)
             half = "q1" if int(day.day) <= 15 else "q2"
-            totals_minutes_by_employee[emp_id][f"{half}_common"] += normal_minutes
-            totals_minutes_by_employee[emp_id][f"{half}_extra"] += max(0, extra_minutes)
+            totals_minutes_by_employee[label][f"{half}_common"] += normal_minutes
+            totals_minutes_by_employee[label][f"{half}_extra"] += max(0, extra_minutes)
             # Employee cols start after A,B,C
             cell_status_map[(excel_row, 4 + emp_index)] = status
         rows.append(row_data)
@@ -390,8 +498,8 @@ def _build_liquidar_sheet(
 
     def _summary_row(label_text: str, metric_key: str) -> dict[str, object]:
         row_data: dict[str, object] = {"Fecha": "", "Dia": label_text, "Dia #": ""}
-        for emp_id, _, emp_label in employees:
-            row_data[emp_label] = _hours(totals_minutes_by_employee[emp_id][metric_key])
+        for _, _, emp_label in employees:
+            row_data[emp_label] = _hours(totals_minutes_by_employee[emp_label][metric_key])
         return row_data
 
     q1_days = [day for day in all_days if int(day.day) <= 15]
@@ -402,27 +510,34 @@ def _build_liquidar_sheet(
 
     if q1_days:
         rows.append(_summary_row("1ra Quincena - Horas Comunes", "q1_common"))
-        rows.append(_summary_row("1ra Quincena - Horas Extras", "q1_extra"))
-        excel_row += 2
+        excel_row += 1
+        if include_extra_summary_rows:
+            rows.append(_summary_row("1ra Quincena - Horas Extras", "q1_extra"))
+            excel_row += 1
 
     for day in q2_days:
         _append_day_row(day)
 
     if q2_days:
         rows.append(_summary_row("2da Quincena - Horas Comunes", "q2_common"))
-        rows.append(_summary_row("2da Quincena - Horas Extras", "q2_extra"))
-        excel_row += 2
+        excel_row += 1
+        if include_extra_summary_rows:
+            rows.append(_summary_row("2da Quincena - Horas Extras", "q2_extra"))
+            excel_row += 1
 
     total_common_row: dict[str, object] = {"Fecha": "", "Dia": "Total Mes - Horas Comunes", "Dia #": ""}
-    total_extra_row: dict[str, object] = {"Fecha": "", "Dia": "Total Mes - Horas Extras", "Dia #": ""}
-    for emp_id, _, emp_label in employees:
+    for _, _, emp_label in employees:
         total_common_row[emp_label] = _hours(
-            totals_minutes_by_employee[emp_id]["q1_common"] + totals_minutes_by_employee[emp_id]["q2_common"]
+            totals_minutes_by_employee[emp_label]["q1_common"] + totals_minutes_by_employee[emp_label]["q2_common"]
         )
-        total_extra_row[emp_label] = _hours(
-            totals_minutes_by_employee[emp_id]["q1_extra"] + totals_minutes_by_employee[emp_id]["q2_extra"]
-        )
-    rows.extend([total_common_row, total_extra_row])
+    rows.append(total_common_row)
+    if include_total_extra_row:
+        total_extra_row: dict[str, object] = {"Fecha": "", "Dia": "Total Mes - Horas Extras", "Dia #": ""}
+        for _, _, emp_label in employees:
+            total_extra_row[emp_label] = _hours(
+                totals_minutes_by_employee[emp_label]["q1_extra"] + totals_minutes_by_employee[emp_label]["q2_extra"]
+            )
+        rows.append(total_extra_row)
 
     liquidar_df = pd.DataFrame(rows, columns=cols_base + employee_labels)
     return liquidar_df, cell_status_map
@@ -431,6 +546,7 @@ def _build_liquidar_sheet(
 def _apply_liquidar_format(
     worksheet,
     status_cells: dict[tuple[int, int], str],
+    avoid_dark_green: bool = False,
 ) -> None:
     headers = [cell.value for cell in worksheet[1]]
     header_to_idx = {str(value): idx + 1 for idx, value in enumerate(headers) if value is not None}
@@ -481,6 +597,9 @@ def _apply_liquidar_format(
 
     # Color cells by status for liquidation view
     for (row_idx, col_idx), status in status_cells.items():
+        status_norm = _normalize_status(status)
+        if avoid_dark_green and status_norm in {"tarde", "tardanza"}:
+            continue
         style = _status_style(status)
         fill = style.get("fill")
         font = style.get("font")
@@ -490,10 +609,10 @@ def _apply_liquidar_format(
         if font is not None:
             cell.font = font
 
-    _append_liquidar_legend(worksheet)
+    _append_liquidar_legend(worksheet, avoid_dark_green=avoid_dark_green)
 
 
-def _append_liquidar_legend(worksheet) -> None:
+def _append_liquidar_legend(worksheet, avoid_dark_green: bool = False) -> None:
     legend_items = [
         ("Domingo", "domingo"),
         ("Ausente", "ausente"),
@@ -533,7 +652,10 @@ def _append_liquidar_legend(worksheet) -> None:
 
         box = worksheet.cell(row=row_idx, column=box_col)
         text = worksheet.cell(row=row_idx, column=text_col)
-        style = _status_style(status_key)
+        resolved_status_key = status_key
+        if avoid_dark_green and status_key in {"tarde", "tardanza"}:
+            resolved_status_key = "normal"
+        style = _status_style(resolved_status_key)
 
         box.value = ""
         box.border = THIN_BORDER
@@ -685,6 +807,17 @@ def export_report(
         diario_export,
         output.parent,
     )
+    hs_riorda_export, hs_riorda_status_cells = _build_liquidar_sheet(
+        diario_export,
+        output.parent,
+        allowed_employee_names=HS_RIORDA_TARGET_NAMES,
+        forced_employees=HS_RIORDA_TARGET_EMPLOYEES_ORDERED,
+        include_saturdays_with_attendance=False,
+        include_extra_summary_rows=False,
+        include_total_extra_row=False,
+        max_normal_hours_by_employee_id=HS_RIORDA_MAX_NORMAL_HOURS_BY_ID,
+        ignore_tardiness_for_normal_hours=True,
+    )
     try:
         with pd.ExcelWriter(temp_output, engine="openpyxl") as writer:
             diario_export.to_excel(writer, sheet_name="Diario", index=False)
@@ -698,6 +831,7 @@ def export_report(
                 startrow=detail_startrow,
             )
             liquidar_export.to_excel(writer, sheet_name="Liquidar", index=False)
+            hs_riorda_export.to_excel(writer, sheet_name=HS_RIORDA_SHEET, index=False)
 
             workbook = writer.book
             for sheet_name in ("Diario", "Mensual"):
@@ -708,6 +842,7 @@ def export_report(
                 detail_header_row=detail_startrow + 1,
             )
             _apply_liquidar_format(workbook["Liquidar"], liquidar_status_cells)
+            _apply_liquidar_format(workbook[HS_RIORDA_SHEET], hs_riorda_status_cells, avoid_dark_green=True)
 
         temp_output.replace(output)
     except Exception as exc:
