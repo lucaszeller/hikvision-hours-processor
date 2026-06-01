@@ -5,6 +5,7 @@ import queue
 import sys
 import threading
 import time
+import ctypes
 from datetime import date as dt_date, datetime, timedelta
 import math
 from pathlib import Path
@@ -100,6 +101,7 @@ class HikvisionApp(ctk.CTk):
         self.title("Hikvision Hours Processor")
         self.geometry("1220x760")
         self.minsize(1080, 640)
+        self._apply_app_icon()
 
         ctk.set_appearance_mode("System")
         ctk.set_default_color_theme("dark-blue")
@@ -176,6 +178,33 @@ class HikvisionApp(ctk.CTk):
         self._refresh_absence_type_options()
         self._sync_absence_types_dropdown_in_template()
         self._refresh_employee_options()
+
+    def _apply_app_icon(self) -> None:
+        base_dir = get_app_base_dir()
+        ico_path = base_dir / "app.ico"
+        png_path = base_dir / "logo.png"
+
+        if sys.platform.startswith("win"):
+            try:
+                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+                    "Porta.HikvisionHoursProcessor"
+                )
+            except Exception:
+                pass
+
+        if ico_path.exists():
+            try:
+                self.iconbitmap(str(ico_path))
+            except Exception:
+                pass
+
+        if png_path.exists():
+            try:
+                icon_image = tk.PhotoImage(file=str(png_path))
+                self.iconphoto(True, icon_image)
+                self._window_icon_image = icon_image
+            except Exception:
+                pass
 
     def _build_ui(self) -> None:
         self.grid_columnconfigure(0, weight=1)
