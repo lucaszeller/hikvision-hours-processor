@@ -353,7 +353,10 @@ def _build_liquidar_sheet(
     max_normal_hours_by_employee_id: dict[str, float] | None = None,
     ignore_tardiness_for_normal_hours: bool = False,
     include_weekly_common_rows: bool = False,
+    include_weekly_extra_rows: bool = False,
     fill_missing_scheduled_as_absent: bool = False,
+    weekly_common_cap_minutes: int | None = None,
+    include_blank_row_after_quincena: bool = False,
 ) -> tuple[pd.DataFrame, dict[tuple[int, int], str]]:
     cols_base = ["Fecha", "Dia", "Dia #"]
     if daily_df.empty:
@@ -487,7 +490,7 @@ def _build_liquidar_sheet(
     }
     excel_row = 2  # header is row 1
 
-    def _append_day_row(day: pd.Timestamp) -> dict[str, int]:
+    def _append_day_row(day: pd.Timestamp) -> tuple[dict[str, int], dict[str, int]]:
         nonlocal excel_row
         row_data: dict[str, object] = {
             "Fecha": day.date(),
@@ -495,6 +498,7 @@ def _build_liquidar_sheet(
             "Dia #": int(day.day),
         }
         day_common_minutes: dict[str, int] = {label: 0 for _, _, label in employees}
+        day_extra_minutes: dict[str, int] = {label: 0 for _, _, label in employees}
         is_saturday = int(day.weekday()) == 5
         attendance_statuses = {"normal", "tarde", "tardanza", "domingo"}
         for emp_index, (emp_id, employee_name, label) in enumerate(employees, start=0):
@@ -559,6 +563,7 @@ def _build_liquidar_sheet(
             display_minutes = total_minutes if is_saturday else normal_minutes
             row_data[label] = round(display_minutes / 60, 2)
             day_common_minutes[label] = normal_minutes
+            day_extra_minutes[label] = max(0, extra_minutes)
             half = "q1" if int(day.day) <= 15 else "q2"
             totals_minutes_by_employee[label][f"{half}_common"] += normal_minutes
             totals_minutes_by_employee[label][f"{half}_extra"] += max(0, extra_minutes)
@@ -566,7 +571,7 @@ def _build_liquidar_sheet(
             cell_status_map[(excel_row, 4 + emp_index)] = status
         rows.append(row_data)
         excel_row += 1
-        return day_common_minutes
+        return day_common_minutes, day_extra_minutes
 
     def _hours(minutes: int) -> float:
         return round(max(0, int(minutes)) / 60, 2)
@@ -577,33 +582,73 @@ def _build_liquidar_sheet(
             row_data[emp_label] = _hours(totals_minutes_by_employee[emp_label][metric_key])
         return row_data
 
-    def _append_week_row(week_index: int, minutes_by_employee: dict[str, int]) -> None:
+    def _blank_row() -> dict[str, object]:
+        row_data: dict[str, object] = {"Fecha": "", "Dia": "", "Dia #": ""}
+        for _, _, emp_label in employees:
+            row_data[emp_label] = ""
+        return row_data
+
+    def _append_week_row(week_index: int, minutes_by_employee: dict[str, int], metric: str) -> None:
         nonlocal excel_row
-        week_row: dict[str, object] = {"Fecha": "", "Dia": f"Total Semana {week_index} - Horas Comunes", "Dia #": ""}
+        week_row: dict[str, object] = {"Fecha": "", "Dia": f"Total Semana {week_index} - {metric}", "Dia #": ""}
         for _, _, emp_label in employees:
             week_row[emp_label] = _hours(minutes_by_employee[emp_label])
         rows.append(week_row)
         excel_row += 1
 
+    def _finalize_week(
+        week_index: int,
+        week_common_minutes: dict[str, int],
+        week_extra_minutes: dict[str, int],
+        half_key: str,
+    ) -> tuple[int, dict[str, int], dict[str, int]]:
+        display_week_common = dict(week_common_minutes)
+        display_week_extra = dict(week_extra_minutes)
+        cap = int(weekly_common_cap_minutes) if weekly_common_cap_minutes is not None else None
+        for label, common_minutes in week_common_minutes.items():
+            if cap is not None and common_minutes > cap:
+                overflow = common_minutes - cap
+                totals_minutes_by_employee[label][f"{half_key}_common"] -= overflow
+                totals_minutes_by_employee[label][f"{half_key}_extra"] += overflow
+                display_week_common[label] = cap
+                display_week_extra[label] = display_week_extra[label] + overflow
+        if include_weekly_common_rows:
+            _append_week_row(week_index, display_week_common, "Horas Comunes")
+        if include_weekly_extra_rows:
+            _append_week_row(week_index, display_week_extra, "Horas Extras")
+        if include_weekly_common_rows or include_weekly_extra_rows:
+            week_index += 1
+        return (
+            week_index,
+            {label: 0 for _, _, label in employees},
+            {label: 0 for _, _, label in employees},
+        )
+
     q1_days = [day for day in all_days if int(day.day) <= 15]
     q2_days = [day for day in all_days if int(day.day) > 15]
     week_index = 1
-    current_week_minutes = {label: 0 for _, _, label in employees}
+    current_week_common_minutes = {label: 0 for _, _, label in employees}
+    current_week_extra_minutes = {label: 0 for _, _, label in employees}
 
     for day in q1_days:
-        day_minutes = _append_day_row(day)
-        if include_weekly_common_rows:
-            for label, value in day_minutes.items():
-                current_week_minutes[label] += value
-            if int(day.weekday()) == 4:
-                _append_week_row(week_index, current_week_minutes)
-                week_index += 1
-                current_week_minutes = {label: 0 for _, _, label in employees}
+        day_common, day_extra = _append_day_row(day)
+        for label, value in day_common.items():
+            current_week_common_minutes[label] += value
+        for label, value in day_extra.items():
+            current_week_extra_minutes[label] += value
+        if int(day.weekday()) == 4:
+            (
+                week_index,
+                current_week_common_minutes,
+                current_week_extra_minutes,
+            ) = _finalize_week(week_index, current_week_common_minutes, current_week_extra_minutes, "q1")
 
-    if include_weekly_common_rows and q1_days and any(current_week_minutes.values()):
-        _append_week_row(week_index, current_week_minutes)
-        week_index += 1
-        current_week_minutes = {label: 0 for _, _, label in employees}
+    if q1_days and (any(current_week_common_minutes.values()) or any(current_week_extra_minutes.values())):
+        (
+            week_index,
+            current_week_common_minutes,
+            current_week_extra_minutes,
+        ) = _finalize_week(week_index, current_week_common_minutes, current_week_extra_minutes, "q1")
 
     if q1_days:
         rows.append(_summary_row("1ra Quincena - Horas Comunes", "q1_common"))
@@ -611,26 +656,38 @@ def _build_liquidar_sheet(
         if include_extra_summary_rows:
             rows.append(_summary_row("1ra Quincena - Horas Extras", "q1_extra"))
             excel_row += 1
+        if include_blank_row_after_quincena:
+            rows.append(_blank_row())
+            excel_row += 1
 
     for day in q2_days:
-        day_minutes = _append_day_row(day)
-        if include_weekly_common_rows:
-            for label, value in day_minutes.items():
-                current_week_minutes[label] += value
-            if int(day.weekday()) == 4:
-                _append_week_row(week_index, current_week_minutes)
-                week_index += 1
-                current_week_minutes = {label: 0 for _, _, label in employees}
+        day_common, day_extra = _append_day_row(day)
+        for label, value in day_common.items():
+            current_week_common_minutes[label] += value
+        for label, value in day_extra.items():
+            current_week_extra_minutes[label] += value
+        if int(day.weekday()) == 4:
+            (
+                week_index,
+                current_week_common_minutes,
+                current_week_extra_minutes,
+            ) = _finalize_week(week_index, current_week_common_minutes, current_week_extra_minutes, "q2")
 
-    if include_weekly_common_rows and q2_days and any(current_week_minutes.values()):
-        _append_week_row(week_index, current_week_minutes)
-        week_index += 1
+    if q2_days and (any(current_week_common_minutes.values()) or any(current_week_extra_minutes.values())):
+        (
+            week_index,
+            current_week_common_minutes,
+            current_week_extra_minutes,
+        ) = _finalize_week(week_index, current_week_common_minutes, current_week_extra_minutes, "q2")
 
     if q2_days:
         rows.append(_summary_row("2da Quincena - Horas Comunes", "q2_common"))
         excel_row += 1
         if include_extra_summary_rows:
             rows.append(_summary_row("2da Quincena - Horas Extras", "q2_extra"))
+            excel_row += 1
+        if include_blank_row_after_quincena:
+            rows.append(_blank_row())
             excel_row += 1
 
     total_common_row: dict[str, object] = {"Fecha": "", "Dia": "Total Mes - Horas Comunes", "Dia #": ""}
@@ -963,12 +1020,15 @@ def export_report(
         allowed_employee_names=HS_RIORDA_TARGET_NAMES,
         forced_employees=HS_RIORDA_TARGET_EMPLOYEES_ORDERED,
         include_saturdays_with_attendance=False,
-        include_extra_summary_rows=False,
-        include_total_extra_row=False,
+        include_extra_summary_rows=True,
+        include_total_extra_row=True,
         max_normal_hours_by_employee_id=HS_RIORDA_MAX_NORMAL_HOURS_BY_ID,
         ignore_tardiness_for_normal_hours=True,
         include_weekly_common_rows=True,
+        include_weekly_extra_rows=True,
         fill_missing_scheduled_as_absent=True,
+        weekly_common_cap_minutes=44 * 60,
+        include_blank_row_after_quincena=True,
     )
     try:
         with pd.ExcelWriter(temp_output, engine="openpyxl") as writer:

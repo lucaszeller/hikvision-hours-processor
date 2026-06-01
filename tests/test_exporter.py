@@ -738,7 +738,7 @@ def test_export_creates_hs_riorda_sheet_with_only_target_employees(tmp_path: Pat
     assert ws.max_column == 23
 
 
-def test_hs_riorda_excludes_saturday_and_extra_summary_rows(tmp_path: Path) -> None:
+def test_hs_riorda_excludes_saturday_and_includes_monthly_extra_summary_row(tmp_path: Path) -> None:
     daily_df = pd.DataFrame(
         {
             "ID de persona": ["20", "20"],
@@ -781,9 +781,8 @@ def test_hs_riorda_excludes_saturday_and_extra_summary_rows(tmp_path: Path) -> N
     labels = [str(row[1] or "") for row in rows]
 
     assert "Sabado" not in labels
-    assert "1ra Quincena - Horas Extras" not in labels
-    assert "2da Quincena - Horas Extras" not in labels
-    assert "Total Mes - Horas Extras" not in labels
+    assert "1ra Quincena - Horas Extras" in labels
+    assert "Total Mes - Horas Extras" in labels
 
 
 def test_hs_riorda_caps_normal_hours_by_employee(tmp_path: Path) -> None:
@@ -986,19 +985,92 @@ def test_hs_riorda_adds_weekly_totals_and_keeps_quincena_total(tmp_path: Path) -
 
     assert "Total Semana 1 - Horas Comunes" in labels
     assert "Total Semana 2 - Horas Comunes" in labels
+    assert "Total Semana 1 - Horas Extras" in labels
+    assert "Total Semana 2 - Horas Extras" in labels
     assert "1ra Quincena - Horas Comunes" in labels
 
     first_friday_idx = labels.index("Viernes")
     week_1_idx = labels.index("Total Semana 1 - Horas Comunes")
+    week_1_extra_idx = labels.index("Total Semana 1 - Horas Extras")
     second_friday_idx = labels.index("Viernes", first_friday_idx + 1)
     week_2_idx = labels.index("Total Semana 2 - Horas Comunes")
+    week_2_extra_idx = labels.index("Total Semana 2 - Horas Extras")
     q1_idx = labels.index("1ra Quincena - Horas Comunes")
 
     # Debajo de cada viernes aparece el total semanal.
     assert week_1_idx == first_friday_idx + 1
+    assert week_1_extra_idx == week_1_idx + 1
     assert week_2_idx == second_friday_idx + 1
+    assert week_2_extra_idx == week_2_idx + 1
     # Luego se mantiene el total de quincena.
-    assert q1_idx > week_2_idx
+    assert q1_idx > week_2_extra_idx
+
+    headers = [ws.cell(row=1, column=col).value for col in range(1, ws.max_column + 1)]
+    header_to_idx = {str(h): idx + 1 for idx, h in enumerate(headers)}
+    employee_col = header_to_idx["20 De Carli Gonzalo"]
+    week1_row = week_1_idx + 2
+    week2_row = week_2_idx + 2
+    week1_extra_row = week_1_extra_idx + 2
+    week2_extra_row = week_2_extra_idx + 2
+    q1_row = q1_idx + 2
+
+    # 5 dias x 9h = 45h, pero en hs-riorda las comunes semanales se topan en 44h.
+    assert ws.cell(row=week1_row, column=employee_col).value == 44
+    assert ws.cell(row=week2_row, column=employee_col).value == 44
+    # El excedente semanal (1h) pasa a fila de horas extras semanal.
+    assert ws.cell(row=week1_extra_row, column=employee_col).value == 1
+    assert ws.cell(row=week2_extra_row, column=employee_col).value == 1
+    # Quincena: 44 + 44 = 88h comunes.
+    assert ws.cell(row=q1_row, column=employee_col).value == 88
+
+
+def test_hs_riorda_adds_blank_separator_after_each_quincena(tmp_path: Path) -> None:
+    dates = pd.date_range("2026-05-01", "2026-05-20", freq="B")
+    daily_df = pd.DataFrame(
+        {
+            "ID de persona": ["20"] * len(dates),
+            "Nombre": ["De Carli Gonzalo"] * len(dates),
+            "Fecha": [d.date() for d in dates],
+            "Departamento": ["A"] * len(dates),
+            "Estado": ["Normal"] * len(dates),
+            "Tramos trabajados": ["07:30 - 18:00"] * len(dates),
+            "Minutos reales": [540] * len(dates),
+            "Minutos redondeados": [540] * len(dates),
+            "Minutos extra": [0] * len(dates),
+            "Horas extra": ["00:00"] * len(dates),
+            "Horas totales": ["09:00"] * len(dates),
+        }
+    )
+    monthly_df = pd.DataFrame(
+        columns=[
+            "ID de persona",
+            "Nombre",
+            "Dias trabajados",
+            "Minutos totales",
+            "Minutos extra",
+            "Horas extra",
+            "Horas totales",
+        ]
+    )
+    inconsistencies_df = pd.DataFrame(
+        columns=["ID de persona", "Nombre", "Fecha", "Tipo de inconsistencia", "Detalle"]
+    )
+
+    output = tmp_path / "reporte_hs_riorda_separadores_quincena.xlsx"
+    export_report(output, daily_df, monthly_df, inconsistencies_df)
+
+    wb = load_workbook(output)
+    ws = wb["hs-riorda"]
+    labels = [str(ws.cell(row=r, column=2).value or "") for r in range(2, ws.max_row + 1)]
+
+    q1_extra_idx = labels.index("1ra Quincena - Horas Extras")
+    q2_extra_idx = labels.index("2da Quincena - Horas Extras")
+
+    q1_blank_row = q1_extra_idx + 2 + 1
+    q2_blank_row = q2_extra_idx + 2 + 1
+
+    assert str(ws.cell(row=q1_blank_row, column=2).value or "").strip() == ""
+    assert str(ws.cell(row=q2_blank_row, column=2).value or "").strip() == ""
 
 
 def test_hs_riorda_marks_missing_scheduled_weekday_as_absent_and_keeps_non_working_day_blank(tmp_path: Path) -> None:
