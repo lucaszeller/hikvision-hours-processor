@@ -2212,68 +2212,76 @@ class HikvisionApp(ctk.CTk):
         def _label(row_idx: int) -> str:
             return str(worksheet.cell(row=row_idx, column=2).value or "").strip().lower()
 
-        def _formula_for_rows(col_idx: int, rows: list[int]) -> str:
-            if not rows:
-                return "=0"
-            col = get_column_letter(col_idx)
-            terms = [f"{col}{row}" for row in rows]
-            return "=" + "+".join(terms)
-
         def _formula_for_cell_refs(refs: list[str]) -> str:
             if not refs:
                 return "=0"
             return "=" + "+".join(refs)
 
+        def _refs_for_rows(col_idx: int, rows: list[int]) -> list[str]:
+            col = get_column_letter(col_idx)
+            return [f"{col}{row}" for row in rows]
+
         employee_cols = list(range(4, worksheet.max_column + 1))
         week_rows: list[int] = []
-        q1_rows: list[int] = []
-        q2_rows: list[int] = []
-        all_rows: list[int] = []
+        q1_week_common_rows: list[int] = []
+        q2_week_common_rows: list[int] = []
+        all_week_common_rows: list[int] = []
         q1_week_extra_rows: list[int] = []
         q2_week_extra_rows: list[int] = []
         all_week_extra_rows: list[int] = []
         current_week_half = "q1"
-        last_week_common_row: int | None = None
+        last_week_rows: list[int] = []
 
         for row_idx in range(2, worksheet.max_row + 1):
             if _is_daily_row(row_idx):
                 week_rows.append(row_idx)
-                all_rows.append(row_idx)
                 day_number = worksheet.cell(row=row_idx, column=3).value
                 try:
                     day_int = int(day_number)
                 except Exception:
                     day_int = 0
                 if 1 <= day_int <= 15:
-                    q1_rows.append(row_idx)
                     current_week_half = "q1"
                 elif day_int > 15:
-                    q2_rows.append(row_idx)
                     current_week_half = "q2"
                 continue
 
             row_label = _label(row_idx)
             if row_label.startswith("total semana") and "horas comunes" in row_label:
+                last_week_rows = list(week_rows)
                 for col_idx in employee_cols:
-                    worksheet.cell(row=row_idx, column=col_idx).value = _formula_for_rows(col_idx, week_rows)
-                last_week_common_row = row_idx
+                    refs = _refs_for_rows(col_idx, week_rows)
+                    if not refs:
+                        worksheet.cell(row=row_idx, column=col_idx).value = "=0"
+                    else:
+                        sum_formula = _formula_for_cell_refs(refs)[1:]
+                        worksheet.cell(row=row_idx, column=col_idx).value = f"=MIN(44,{sum_formula})"
+                if current_week_half == "q1":
+                    q1_week_common_rows.append(row_idx)
+                else:
+                    q2_week_common_rows.append(row_idx)
+                all_week_common_rows.append(row_idx)
                 week_rows = []
             elif row_label.startswith("total semana") and "horas extras" in row_label:
                 for col_idx in employee_cols:
-                    col = get_column_letter(col_idx)
-                    if last_week_common_row is None:
+                    refs = _refs_for_rows(col_idx, last_week_rows)
+                    if not refs:
                         worksheet.cell(row=row_idx, column=col_idx).value = "=0"
-                        continue
-                    common_ref = f"{col}{last_week_common_row}"
-                    worksheet.cell(row=row_idx, column=col_idx).value = f"=MAX(0,{common_ref}-44)"
+                    else:
+                        sum_formula = _formula_for_cell_refs(refs)[1:]
+                        worksheet.cell(row=row_idx, column=col_idx).value = f"=MAX(0,{sum_formula}-44)"
                 if current_week_half == "q1":
                     q1_week_extra_rows.append(row_idx)
                 else:
                     q2_week_extra_rows.append(row_idx)
                 all_week_extra_rows.append(row_idx)
+                last_week_rows = []
+                week_rows = []
             elif row_label == "1ra quincena - horas comunes":
                 for col_idx in employee_cols:
-                    worksheet.cell(row=row_idx, column=col_idx).value = _formula_for_rows(col_idx, q1_rows)
+                    col = get_column_letter(col_idx)
+                    refs = [f"{col}{r}" for r in q1_week_common_rows]
+                    worksheet.cell(row=row_idx, column=col_idx).value = _formula_for_cell_refs(refs)
                 week_rows = []
             elif row_label == "1ra quincena - horas extras":
                 for col_idx in employee_cols:
@@ -2283,7 +2291,9 @@ class HikvisionApp(ctk.CTk):
                 week_rows = []
             elif row_label == "2da quincena - horas comunes":
                 for col_idx in employee_cols:
-                    worksheet.cell(row=row_idx, column=col_idx).value = _formula_for_rows(col_idx, q2_rows)
+                    col = get_column_letter(col_idx)
+                    refs = [f"{col}{r}" for r in q2_week_common_rows]
+                    worksheet.cell(row=row_idx, column=col_idx).value = _formula_for_cell_refs(refs)
                 week_rows = []
             elif row_label == "2da quincena - horas extras":
                 for col_idx in employee_cols:
@@ -2293,7 +2303,9 @@ class HikvisionApp(ctk.CTk):
                 week_rows = []
             elif row_label == "total mes - horas comunes":
                 for col_idx in employee_cols:
-                    worksheet.cell(row=row_idx, column=col_idx).value = _formula_for_rows(col_idx, all_rows)
+                    col = get_column_letter(col_idx)
+                    refs = [f"{col}{r}" for r in all_week_common_rows]
+                    worksheet.cell(row=row_idx, column=col_idx).value = _formula_for_cell_refs(refs)
             elif row_label == "total mes - horas extras":
                 for col_idx in employee_cols:
                     col = get_column_letter(col_idx)
