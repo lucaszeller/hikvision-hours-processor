@@ -33,11 +33,8 @@ def _is_yes(value: object) -> bool:
     return text in {"si", "s", "yes", "y", "true", "1"}
 
 
-def _is_flexible_attendance(name_value: object, group_value: object) -> bool:
-    name_key = _normalize(name_value)
+def _is_flexible_attendance_by_group(group_value: object) -> bool:
     group_key = _normalize(group_value)
-    if name_key == "juarez paulina":
-        return True
     return any(token in group_key for token in {"maestranza", "limpieza"})
 
 
@@ -161,6 +158,7 @@ def load_schedule_profiles(info_path: str | Path) -> dict[str, dict[str, Any]]:
     col_days = _best_column(columns, ["dias", "dias laborales", "dias de trabajo"])
     col_name = _best_column(columns, ["nombre", "name", "empleado"])
     col_group = _best_column(columns, ["grupo", "sector", "area"])
+    col_flexible = _best_column(columns, ["asistencia flexible", "flexible"])
 
     if col_id is None:
         raise ScheduleInfoError("No se encontro columna de ID en el archivo de horarios.")
@@ -176,10 +174,12 @@ def load_schedule_profiles(info_path: str | Path) -> dict[str, dict[str, Any]]:
         afternoon_in = _to_time(row[col_t_in]) if col_t_in else None
         afternoon_out = _to_time(row[col_t_out]) if col_t_out else None
         is_continuous = _is_yes(row[col_corrido]) if col_corrido else False
-        is_flexible = _is_flexible_attendance(
-            row[col_name] if col_name else "",
-            row[col_group] if col_group else "",
-        )
+        if col_flexible:
+            is_flexible = _is_yes(row[col_flexible])
+        else:
+            is_flexible = _is_flexible_attendance_by_group(
+                row[col_group] if col_group else "",
+            )
 
         if is_continuous:
             start = morning_in or afternoon_in

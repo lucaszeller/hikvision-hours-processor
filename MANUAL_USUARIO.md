@@ -10,7 +10,7 @@ Esta guia esta escrita para uso cotidiano. No hace falta conocimiento tecnico.
 
 1. Archivo de fichadas exportado desde Hikvision (`.xls` o `.xlsx`).
 2. Archivo `date.xlsx` en la carpeta del sistema (empleados, horarios y ausencias).
-3. Archivo de excepciones por defecto: `feriados_nacionales_argentina_2026.xlsx`.
+3. Ausencias y feriados configurados en `date.xlsx` (hoja `Ausencias`).
 
 ## 3. Abrir la aplicacion
 

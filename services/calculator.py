@@ -41,7 +41,12 @@ INCONSISTENCIAS_COLUMNS = [
 
 
 SATURDAY_START_MINUTE = 7 * 60 + 30
+SATURDAY_END_MINUTE = 11 * 60 + 30
 
+
+# ---------------------------------------------------------------------------
+# Helpers de conversión y formato
+# ---------------------------------------------------------------------------
 
 def _minutes_to_hhmm(total_minutes: int) -> str:
     hours, minutes = divmod(max(0, int(total_minutes)), 60)
@@ -369,32 +374,52 @@ def _build_split_theoretical_segments(
     return result
 
 
-def process_punches(
+# ---------------------------------------------------------------------------
+# Funciones extraídas del proceso principal
+# ---------------------------------------------------------------------------
+
+def _suppress_inconsistencies(
+    inconsistencies: list[dict],
+    suppress_map: dict[tuple[str, str, date | None], set[str]],
+) -> list[dict]:
+    """Filtra inconsistencias cuyos tipos estén suprimidos para ese día/empleado."""
+    result = []
+    for issue in inconsistencies:
+        issue_type = str(issue.get("Tipo de inconsistencia", "")).strip()
+        issue_date_parsed = _parse_date(issue.get("Fecha"))
+        issue_key = (
+            str(issue.get("ID de persona", "")).strip(),
+            str(issue.get("Nombre", "")).strip(),
+            issue_date_parsed.date() if issue_date_parsed is not None else None,
+        )
+        suppressed_types = suppress_map.get(issue_key)
+        if issue_key[2] is None or suppressed_types is None or issue_type not in suppressed_types:
+            result.append(issue)
+    return result
+
+
+def _parse_punch_rows(
     df: pd.DataFrame,
-    exceptions: list[WorkException] | None = None,
-    scheduled_minutes_by_employee: dict[str, int] | None = None,
-    scheduled_start_minute_by_employee: dict[str, int] | None = None,
-    working_weekdays_by_employee: dict[str, set[int]] | None = None,
-    split_schedule_by_employee: dict[str, dict[str, int | bool | None]] | None = None,
-    flexible_attendance_employee_ids: set[str] | None = None,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    exceptions_index: object,
+    scheduled_minutes_by_employee: dict[str, int],
+    working_weekdays_by_employee: dict[str, set[int]],
+    flexible_attendance_employee_ids: set[str],
+    has_schedule_reference: bool,
+) -> tuple[list[dict], list[dict], dict, dict, dict[str, str], dict[str, set[str]], set]:
+    """
+    Itera sobre cada fila del reporte Hikvision: parsea empleado, fecha y horarios;
+    detecta inconsistencias; y agrupa tramos en valid_segments y partial_day_punches.
+
+    Retorna:
+        valid_segments, inconsistencies, partial_day_punches, day_flags,
+        employee_name_by_id, departments_by_id, used_exception_keys
+    """
     valid_segments: list[dict] = []
     inconsistencies: list[dict] = []
-    partial_day_punches: dict[tuple[str, str, date], dict[str, object]] = {}
-    day_flags: dict[tuple[str, str, date], dict[str, object]] = {}
+    partial_day_punches: dict[tuple[str, str, date], dict] = {}
+    day_flags: dict[tuple[str, str, date], dict] = {}
     employee_name_by_id: dict[str, str] = {}
     departments_by_id: dict[str, set[str]] = {}
-
-    exceptions = exceptions or []
-    scheduled_minutes_by_employee = scheduled_minutes_by_employee or {}
-    scheduled_start_minute_by_employee = scheduled_start_minute_by_employee or {}
-    working_weekdays_by_employee = working_weekdays_by_employee or {}
-    split_schedule_by_employee = split_schedule_by_employee or {}
-    flexible_attendance_employee_ids = {
-        str(value).strip() for value in (flexible_attendance_employee_ids or set()) if str(value).strip() != ""
-    }
-    has_schedule_reference = bool(scheduled_minutes_by_employee)
-    exceptions_index = build_exception_index(exceptions)
     used_exception_keys: set[tuple[str | None, date, str, str]] = set()
 
     for _, row in df.iterrows():
@@ -416,21 +441,13 @@ def process_punches(
 
         if employee_id == "":
             _inconsistency(
-                inconsistencies,
-                employee_id,
-                employee_name,
-                date_for_report,
-                "ID de persona vacio",
-                "La fila no contiene ID de persona.",
+                inconsistencies, employee_id, employee_name, date_for_report,
+                "ID de persona vacio", "La fila no contiene ID de persona.",
             )
         if employee_name == "":
             _inconsistency(
-                inconsistencies,
-                employee_id,
-                employee_name,
-                date_for_report,
-                "Nombre vacio",
-                "La fila no contiene nombre de empleado.",
+                inconsistencies, employee_id, employee_name, date_for_report,
+                "Nombre vacio", "La fila no contiene nombre de empleado.",
             )
 
         date_parsed = _parse_date(work_date_raw)
@@ -444,12 +461,8 @@ def process_punches(
 
         if date_parsed is None:
             _inconsistency(
-                inconsistencies,
-                employee_id,
-                employee_name,
-                date_for_report,
-                "Fecha invalida",
-                f"Valor recibido: '{work_date_raw}'.",
+                inconsistencies, employee_id, employee_name, date_for_report,
+                "Fecha invalida", f"Valor recibido: '{work_date_raw}'.",
             )
 
         has_entry = not _is_blank(entry_raw)
@@ -518,62 +531,41 @@ def process_punches(
                 continue
             if row_exceptions:
                 _inconsistency(
-                    inconsistencies,
-                    employee_id,
-                    employee_name,
-                    date_for_report,
+                    inconsistencies, employee_id, employee_name, date_for_report,
                     "Excepcion aplicada",
                     "Se omitio inconsistencia de ausencia sin fichadas por excepcion: "
                     + _exception_summary(row_exceptions),
                 )
             else:
                 _inconsistency(
-                    inconsistencies,
-                    employee_id,
-                    employee_name,
-                    date_for_report,
-                    "Ausente",
-                    "Faltan Registro de entrada y Registro de salida.",
+                    inconsistencies, employee_id, employee_name, date_for_report,
+                    "Ausente", "Faltan Registro de entrada y Registro de salida.",
                 )
         elif not has_entry:
             if row_exceptions:
                 _inconsistency(
-                    inconsistencies,
-                    employee_id,
-                    employee_name,
-                    date_for_report,
+                    inconsistencies, employee_id, employee_name, date_for_report,
                     "Excepcion aplicada",
                     "Se omitio inconsistencia de falta de entrada por excepcion: "
                     + _exception_summary(row_exceptions),
                 )
             else:
                 _inconsistency(
-                    inconsistencies,
-                    employee_id,
-                    employee_name,
-                    date_for_report,
-                    "Falta Registro de entrada",
-                    "No se encontro hora de entrada.",
+                    inconsistencies, employee_id, employee_name, date_for_report,
+                    "Falta Registro de entrada", "No se encontro hora de entrada.",
                 )
         elif not has_exit:
             if row_exceptions:
                 _inconsistency(
-                    inconsistencies,
-                    employee_id,
-                    employee_name,
-                    date_for_report,
+                    inconsistencies, employee_id, employee_name, date_for_report,
                     "Excepcion aplicada",
                     "Se omitio inconsistencia de falta de salida por excepcion: "
                     + _exception_summary(row_exceptions),
                 )
             else:
                 _inconsistency(
-                    inconsistencies,
-                    employee_id,
-                    employee_name,
-                    date_for_report,
-                    "Falta Registro de salida",
-                    "No se encontro hora de salida.",
+                    inconsistencies, employee_id, employee_name, date_for_report,
+                    "Falta Registro de salida", "No se encontro hora de salida.",
                 )
 
         entry_time = _parse_time(entry_raw) if has_entry else None
@@ -581,28 +573,16 @@ def process_punches(
 
         if has_entry and entry_time is None:
             _inconsistency(
-                inconsistencies,
-                employee_id,
-                employee_name,
-                date_for_report,
-                "Hora de entrada invalida",
-                f"Valor recibido: '{entry_raw}'.",
+                inconsistencies, employee_id, employee_name, date_for_report,
+                "Hora de entrada invalida", f"Valor recibido: '{entry_raw}'.",
             )
         if has_exit and exit_time is None:
             _inconsistency(
-                inconsistencies,
-                employee_id,
-                employee_name,
-                date_for_report,
-                "Hora de salida invalida",
-                f"Valor recibido: '{exit_raw}'.",
+                inconsistencies, employee_id, employee_name, date_for_report,
+                "Hora de salida invalida", f"Valor recibido: '{exit_raw}'.",
             )
 
-        if (
-            employee_id == ""
-            or employee_name == ""
-            or date_parsed is None
-        ):
+        if employee_id == "" or employee_name == "" or date_parsed is None:
             continue
 
         day_key = (employee_id, employee_name, date_parsed.date())
@@ -628,20 +608,14 @@ def process_punches(
         if end_dt <= start_dt:
             if row_exceptions:
                 _inconsistency(
-                    inconsistencies,
-                    employee_id,
-                    employee_name,
-                    date_parsed.date(),
+                    inconsistencies, employee_id, employee_name, date_parsed.date(),
                     "Excepcion aplicada",
                     "Se omitio inconsistencia de salida menor/igual que entrada por excepcion: "
                     + _exception_summary(row_exceptions),
                 )
             else:
                 _inconsistency(
-                    inconsistencies,
-                    employee_id,
-                    employee_name,
-                    date_parsed.date(),
+                    inconsistencies, employee_id, employee_name, date_parsed.date(),
                     "Salida menor que entrada",
                     f"Entrada {entry_raw} / Salida {exit_raw}.",
                 )
@@ -664,16 +638,36 @@ def process_punches(
             }
         )
 
-    # Dias con horario cortado (Horario corrido = NO) y solo dos fichadas
-    # (primera entrada / ultima salida): usa tramos teoricos de horario y
-    # evita inconsistencias por fichadas intermedias faltantes.
+    return (
+        valid_segments,
+        inconsistencies,
+        partial_day_punches,
+        day_flags,
+        employee_name_by_id,
+        departments_by_id,
+        used_exception_keys,
+    )
+
+
+def _find_split_two_punch_days(
+    partial_day_punches: dict,
+    split_schedule_by_employee: dict,
+) -> tuple[set, dict, dict, dict]:
+    """
+    Detecta días donde el empleado tiene horario partido y solo registró
+    2 fichadas (1 entrada + 1 salida). Esos días se reconstruyen con tramos teóricos.
+
+    Retorna:
+        split_two_punch_days, actual_first_entry_minutes_by_day,
+        actual_first_entry_by_day, actual_last_exit_by_day
+    """
     split_two_punch_days: set[tuple[str, str, date]] = set()
-    inferred_entry_only_days: set[tuple[str, str, date]] = set()
     actual_first_entry_minutes_by_day: dict[tuple[str, str, date], int] = {}
     actual_first_entry_by_day: dict[tuple[str, str, date], datetime] = {}
     actual_last_exit_by_day: dict[tuple[str, str, date], datetime] = {}
+
     for day_key, data in partial_day_punches.items():
-        employee_id, employee_name, work_date = day_key
+        employee_id, _employee_name, _work_date = day_key
         profile = split_schedule_by_employee.get(str(employee_id).strip(), {})
         if bool(profile.get("is_continuous", False)):
             continue
@@ -699,47 +693,58 @@ def process_punches(
         actual_first_entry_by_day[day_key] = first_entry
         actual_last_exit_by_day[day_key] = last_exit
 
-    suppress_issue_by_day: dict[tuple[str, str, date], set[str]] = {}
-    for day_key in split_two_punch_days:
-        suppress_issue_by_day.setdefault(day_key, set()).update(
-            {"Falta Registro de entrada", "Falta Registro de salida"}
-        )
+    return (
+        split_two_punch_days,
+        actual_first_entry_minutes_by_day,
+        actual_first_entry_by_day,
+        actual_last_exit_by_day,
+    )
 
-    if suppress_issue_by_day:
-        filtered_inconsistencies: list[dict] = []
-        for issue in inconsistencies:
-            issue_type = str(issue.get("Tipo de inconsistencia", "")).strip()
-            issue_date = _parse_date(issue.get("Fecha"))
-            issue_key = (
-                str(issue.get("ID de persona", "")).strip(),
-                str(issue.get("Nombre", "")).strip(),
-                issue_date.date() if issue_date is not None else None,
-            )
-            allowed = suppress_issue_by_day.get(issue_key)
-            if issue_key[2] is None or allowed is None or issue_type not in allowed:
-                filtered_inconsistencies.append(issue)
-        inconsistencies = filtered_inconsistencies
 
-    # Reconstruye jornada cuando Hikvision separa entrada/salida en filas distintas
-    # y no existe ningun tramo completo para ese empleado/dia.
-    if split_two_punch_days:
-        preserved_segments: list[dict] = []
-        for seg in valid_segments:
-            seg_key = (str(seg["employee_id"]), str(seg["employee_name"]), seg["work_date"])
-            if seg_key in split_two_punch_days:
-                continue
-            preserved_segments.append(seg)
-        valid_segments = preserved_segments
+def _rebuild_segments(
+    valid_segments: list[dict],
+    partial_day_punches: dict,
+    day_flags: dict,
+    split_two_punch_days: set,
+    actual_first_entry_minutes_by_day: dict,
+    actual_first_entry_by_day: dict,
+    actual_last_exit_by_day: dict,
+    split_schedule_by_employee: dict,
+) -> tuple[list[dict], dict, set, set, dict]:
+    """
+    Reconstruye tramos para:
+    - Días con horario partido y solo 2 fichadas (usa tramos teóricos).
+    - Días con solo entrada (infiere salida por horario esperado).
+    - Días con entrada y salida en filas separadas (consolida en un solo tramo).
+
+    Retorna:
+        valid_segments, day_flags, existing_day_keys,
+        inferred_entry_only_days, actual_first_entry_minutes_by_day
+    """
+    # Elimina tramos crudos de los días que serán reemplazados por tramos teóricos
+    preserved_segments: list[dict] = []
+    for seg in valid_segments:
+        seg_key = (str(seg["employee_id"]), str(seg["employee_name"]), seg["work_date"])
+        if seg_key in split_two_punch_days:
+            continue
+        preserved_segments.append(seg)
+    valid_segments = preserved_segments
 
     existing_day_keys = {
         (str(seg["employee_id"]), str(seg["employee_name"]), seg["work_date"])
         for seg in valid_segments
     }
+    inferred_entry_only_days: set[tuple[str, str, date]] = set()
+
     for day_key, data in partial_day_punches.items():
         employee_id, employee_name, work_date = day_key
+
+        # --- Días con horario partido y solo 2 fichadas: tramos teóricos ---
         if day_key in split_two_punch_days:
             profile = split_schedule_by_employee.get(str(employee_id).strip(), {})
-            department = " / ".join(sorted([d for d in data.get("departments", set()) if str(d).strip() != ""]))
+            department = " / ".join(
+                sorted([d for d in data.get("departments", set()) if str(d).strip() != ""])
+            )
             synthetic_segments = _build_split_theoretical_segments(
                 employee_id=employee_id,
                 employee_name=employee_name,
@@ -755,8 +760,11 @@ def process_punches(
                 if day_key in day_flags:
                     day_flags[day_key]["absent"] = False
             continue
+
         entries = list(data.get("entries", []))
         exits = list(data.get("exits", []))
+
+        # --- Días con solo entrada: infiere salida por horario esperado ---
         if day_key not in existing_day_keys and entries and not exits:
             profile = split_schedule_by_employee.get(str(employee_id).strip(), {})
             first_entry = min(entries)
@@ -794,18 +802,25 @@ def process_punches(
                     if day_key in day_flags:
                         day_flags[day_key]["absent"] = False
                     continue
+
+        # --- Ya tiene tramos completos: no hace falta reconstruir ---
         if day_key in existing_day_keys:
             continue
         if not entries or not exits:
             continue
 
+        # --- Consolidar: primera entrada → última salida ---
         start_dt = min(entries)
         end_dt = max(exits)
         if end_dt <= start_dt:
             continue
 
-        department = " / ".join(sorted([d for d in data.get("departments", set()) if str(d).strip() != ""]))
-        schedule_value = " | ".join(sorted([s for s in data.get("schedules", set()) if str(s).strip() != ""]))
+        department = " / ".join(
+            sorted([d for d in data.get("departments", set()) if str(d).strip() != ""])
+        )
+        schedule_value = " | ".join(
+            sorted([s for s in data.get("schedules", set()) if str(s).strip() != ""])
+        )
         real_minutes = int(round((end_dt - start_dt).total_seconds() / 60))
         rounded_minutes = _floor_to_30(real_minutes)
 
@@ -826,33 +841,29 @@ def process_punches(
         if day_key in day_flags:
             day_flags[day_key]["absent"] = False
 
-    if inferred_entry_only_days:
-        suppress_issue_by_day = {
-            **suppress_issue_by_day,
-            **{
-                day_key: suppress_issue_by_day.get(day_key, set()) | {"Falta Registro de salida"}
-                for day_key in inferred_entry_only_days
-            },
-        }
-        filtered_inconsistencies: list[dict] = []
-        for issue in inconsistencies:
-            issue_type = str(issue.get("Tipo de inconsistencia", "")).strip()
-            issue_date = _parse_date(issue.get("Fecha"))
-            issue_key = (
-                str(issue.get("ID de persona", "")).strip(),
-                str(issue.get("Nombre", "")).strip(),
-                issue_date.date() if issue_date is not None else None,
-            )
-            allowed = suppress_issue_by_day.get(issue_key)
-            if issue_key[2] is None or allowed is None or issue_type not in allowed:
-                filtered_inconsistencies.append(issue)
-        inconsistencies = filtered_inconsistencies
+    return (
+        valid_segments,
+        day_flags,
+        existing_day_keys,
+        inferred_entry_only_days,
+        actual_first_entry_minutes_by_day,
+    )
 
-    # Asegura que excepciones (por ejemplo desde date.xlsx/Ausencias) aparezcan en Diario
-    # aunque no exista fila/fichada de Hikvision para ese empleado y fecha.
-    known_employee_ids: set[str] = set(employee_name_by_id.keys()) | {
-        str(emp_id).strip() for emp_id in scheduled_minutes_by_employee.keys()
-    }
+
+def _inject_exception_days(
+    exceptions: list[WorkException],
+    used_exception_keys: set,
+    known_employee_ids: set[str],
+    employee_name_by_id: dict[str, str],
+    departments_by_id: dict[str, set[str]],
+    day_flags: dict,
+) -> list[dict]:
+    """
+    Asegura que las excepciones (feriados, ausencias) aparezcan en el reporte
+    aunque no exista ninguna fila Hikvision para ese empleado y fecha.
+    Retorna inconsistencias por excepciones configuradas sin uso.
+    """
+    extra_inconsistencies: list[dict] = []
 
     for item in exceptions:
         employee_id = (item.employee_id or "").strip()
@@ -893,7 +904,7 @@ def process_punches(
         if key in used_exception_keys:
             continue
         _inconsistency(
-            inconsistencies,
+            extra_inconsistencies,
             item.employee_id or "",
             "",
             item.exception_date,
@@ -901,6 +912,407 @@ def process_punches(
             f"{item.exception_type}. {item.details}".strip(),
         )
 
+    return extra_inconsistencies
+
+
+def _build_daily_rows(
+    segments_df: pd.DataFrame,
+    day_flags: dict,
+    split_two_punch_days: set,
+    actual_first_entry_minutes_by_day: dict,
+    actual_first_entry_by_day: dict,
+    actual_last_exit_by_day: dict,
+    scheduled_minutes_by_employee: dict[str, int],
+    scheduled_start_minute_by_employee: dict[str, int],
+    working_weekdays_by_employee: dict[str, set[int]],
+    split_schedule_by_employee: dict,
+    flexible_attendance_employee_ids: set[str],
+    has_schedule_reference: bool,
+) -> tuple[list[dict], list[dict]]:
+    """
+    Agrupa tramos por empleado/día, calcula horas extra y clasifica el estado
+    (Normal, Tarde, Ausente, excepción, etc.).
+
+    Retorna: grouped_rows, extra_inconsistencies
+    """
+    extra_inconsistencies: list[dict] = []
+
+    day_rows: dict[tuple[str, str, date], dict] = {}
+    day_first_entry_minutes: dict[tuple[str, str, date], int] = {}
+
+    for (employee_id, employee_name, work_date), group in segments_df.groupby(
+        ["employee_id", "employee_name", "work_date"],
+        sort=True,
+    ):
+        day_key = (str(employee_id), str(employee_name), work_date)
+        departments = [d for d in group["department"].astype(str).str.strip().unique() if d]
+        department_value = " / ".join(departments)
+
+        segments_text: list[str] = []
+        for _, segment in group.iterrows():
+            segments_text.append(_format_segment_text(segment))
+
+        real_total = int(group["real_minutes"].sum())
+        rounded_total = int(group["rounded_minutes"].sum())
+
+        if work_date.weekday() == 5:
+            saturday_first_entry = actual_first_entry_by_day.get(day_key, group["entry_dt"].min())
+            saturday_last_exit = actual_last_exit_by_day.get(day_key, group["exit_dt"].max())
+            if isinstance(saturday_first_entry, datetime) and isinstance(saturday_last_exit, datetime):
+                if saturday_last_exit > saturday_first_entry:
+                    real_total = int(round((saturday_last_exit - saturday_first_entry).total_seconds() / 60))
+                    rounded_total = _floor_to_30(real_total)
+                    segments_text = [
+                        (
+                            f"{saturday_first_entry.strftime('%H:%M')}-{saturday_last_exit.strftime('%H:%M')} "
+                            f"[{SATURDAY_START_MINUTE // 60:02d}:{SATURDAY_START_MINUTE % 60:02d}-{SATURDAY_END_MINUTE // 60:02d}:{SATURDAY_END_MINUTE % 60:02d}]"
+                        )
+                    ]
+
+        first_entry = group["entry_dt"].min()
+        first_entry_minutes = first_entry.hour * 60 + first_entry.minute
+        if day_key in actual_first_entry_minutes_by_day:
+            first_entry_minutes = int(actual_first_entry_minutes_by_day[day_key])
+        day_first_entry_minutes[day_key] = first_entry_minutes
+
+        employee_days = working_weekdays_by_employee.get(str(employee_id).strip(), {0, 1, 2, 3, 4})
+        employee_profile = split_schedule_by_employee.get(str(employee_id).strip(), {})
+        is_flexible_attendance = str(employee_id).strip() in flexible_attendance_employee_ids
+
+        if is_flexible_attendance:
+            overtime_minutes = 0
+        elif work_date.weekday() in {5, 6} or work_date.weekday() not in employee_days:
+            overtime_minutes = rounded_total
+        elif day_key in split_two_punch_days:
+            overtime_minutes = 0
+        else:
+            scheduled_minutes = scheduled_minutes_by_employee.get(str(employee_id).strip())
+            if scheduled_minutes is None:
+                overtime_minutes = 0
+                if has_schedule_reference:
+                    _inconsistency(
+                        extra_inconsistencies,
+                        str(employee_id),
+                        str(employee_name),
+                        work_date,
+                        "Horario no definido",
+                        "No hay horario configurado en info.xlsx para calcular horas extra.",
+                    )
+            else:
+                overtime_by_segment = _overtime_minutes_by_segment(group)
+                if overtime_by_segment is not None:
+                    overtime_minutes = overtime_by_segment
+                else:
+                    overtime_minutes = _floor_to_30(max(0, real_total - int(scheduled_minutes)))
+
+        # Caso: horario corrido sin horas extra — mostrar rango real vs esperado.
+        if (
+            bool(employee_profile.get("is_continuous", False))
+            and overtime_minutes == 0
+            and len(group) == 1
+        ):
+            expected_start_min = employee_profile.get("morning_in_minute")
+            if expected_start_min is None:
+                expected_start_min = employee_profile.get("afternoon_in_minute")
+            expected_end_min = employee_profile.get("afternoon_out_minute")
+            if expected_end_min is None:
+                expected_end_min = employee_profile.get("morning_out_minute")
+
+            expected_start_dt = _minute_to_datetime(work_date, expected_start_min)
+            expected_end_dt = _minute_to_datetime(work_date, expected_end_min)
+            real_start_dt = group.iloc[0]["entry_dt"]
+            real_end_dt = group.iloc[0]["exit_dt"]
+
+            if (
+                isinstance(real_start_dt, datetime)
+                and isinstance(real_end_dt, datetime)
+                and expected_start_dt is not None
+                and expected_end_dt is not None
+                and expected_end_dt > expected_start_dt
+            ):
+                segments_text = [
+                    _format_real_expected_range(
+                        real_start_dt, real_end_dt, expected_start_dt, expected_end_dt,
+                    )
+                ]
+
+        day_rows[day_key] = {
+            "ID de persona": employee_id,
+            "Nombre": employee_name,
+            "Fecha": work_date,
+            "Departamento": department_value,
+            "Tramos trabajados": " ||| ".join(segments_text),
+            "Minutos reales": real_total,
+            "Minutos redondeados": rounded_total,
+            "Minutos extra": overtime_minutes,
+            "Horas extra": _minutes_to_hhmm(overtime_minutes),
+            "Horas totales": _minutes_to_hhmm(rounded_total),
+        }
+
+    # --- Clasificar estado y construir filas finales ---
+    grouped_rows: list[dict] = []
+    all_day_keys = sorted(
+        set(day_rows.keys()) | set(day_flags.keys()),
+        key=lambda k: (k[0], k[2], k[1]),
+    )
+
+    for day_key in all_day_keys:
+        employee_id, employee_name, work_date = day_key
+        is_flexible_attendance = str(employee_id).strip() in flexible_attendance_employee_ids
+        state = day_flags.get(
+            day_key,
+            {
+                "late": False,
+                "absent": False,
+                "departments": set(),
+                "exception_types": [],
+                "paid_exception": False,
+            },
+        )
+        row_data = day_rows.get(day_key)
+        exception_types = [
+            str(v).strip() for v in (state.get("exception_types") or []) if str(v).strip() != ""
+        ]
+        exception_types_lower = [v.lower() for v in exception_types]
+        has_presente = "presente" in exception_types_lower
+        has_non_presente_exception = any(v != "presente" for v in exception_types_lower)
+        suppress_presente_by_saturday_exception = (
+            work_date.weekday() == 5 and has_presente and has_non_presente_exception
+        )
+        apply_presente = has_presente and not suppress_presente_by_saturday_exception
+        preferred_exception = exception_types[0] if exception_types else "Normal"
+        if suppress_presente_by_saturday_exception:
+            preferred_exception = next(
+                (v for v in exception_types if v.strip().lower() != "presente"),
+                preferred_exception,
+            )
+        saturday_has_exception = work_date.weekday() == 5 and bool(exception_types)
+
+        if row_data is None:
+            if (
+                not bool(state.get("absent"))
+                and not bool(state.get("late"))
+                and not state.get("exception_types")
+            ):
+                continue
+            departments = sorted([d for d in state["departments"] if str(d).strip() != ""])
+            paid_exception = bool(state.get("paid_exception"))
+            scheduled_minutes = scheduled_minutes_by_employee.get(str(employee_id).strip(), 0)
+            if apply_presente:
+                paid_minutes = int(scheduled_minutes) if int(scheduled_minutes) > 0 else 0
+            else:
+                paid_minutes = int(scheduled_minutes) if paid_exception and int(scheduled_minutes) > 0 else 0
+            row_data = {
+                "ID de persona": employee_id,
+                "Nombre": employee_name,
+                "Fecha": work_date,
+                "Departamento": " / ".join(departments),
+                "Tramos trabajados": "",
+                "Minutos reales": paid_minutes,
+                "Minutos redondeados": paid_minutes,
+                "Minutos extra": 0,
+                "Horas extra": "00:00",
+                "Horas totales": _minutes_to_hhmm(paid_minutes),
+            }
+        elif apply_presente:
+            # Regla: si hay PRESENTE en date.xlsx, ignora fichadas reales del dia.
+            scheduled_minutes = int(scheduled_minutes_by_employee.get(str(employee_id).strip(), 0) or 0)
+            row_data = {
+                "ID de persona": employee_id,
+                "Nombre": employee_name,
+                "Fecha": work_date,
+                "Departamento": row_data.get("Departamento", ""),
+                "Tramos trabajados": "",
+                "Minutos reales": scheduled_minutes,
+                "Minutos redondeados": scheduled_minutes,
+                "Minutos extra": 0,
+                "Horas extra": "00:00",
+                "Horas totales": _minutes_to_hhmm(scheduled_minutes),
+            }
+        elif suppress_presente_by_saturday_exception:
+            # Sabado con excepcion real en date.xlsx: ignora fichadas y procesa por excepcion.
+            departments = sorted([d for d in state["departments"] if str(d).strip() != ""])
+            if not departments and row_data is not None:
+                departments = [str(row_data.get("Departamento", "")).strip()]
+            paid_exception = bool(state.get("paid_exception"))
+            scheduled_minutes = int(scheduled_minutes_by_employee.get(str(employee_id).strip(), 0) or 0)
+            paid_minutes = scheduled_minutes if paid_exception and scheduled_minutes > 0 else 0
+            row_data = {
+                "ID de persona": employee_id,
+                "Nombre": employee_name,
+                "Fecha": work_date,
+                "Departamento": " / ".join([d for d in departments if d]),
+                "Tramos trabajados": "",
+                "Minutos reales": paid_minutes,
+                "Minutos redondeados": paid_minutes,
+                "Minutos extra": 0,
+                "Horas extra": "00:00",
+                "Horas totales": _minutes_to_hhmm(paid_minutes),
+            }
+
+        if saturday_has_exception:
+            departments = sorted([d for d in state["departments"] if str(d).strip() != ""])
+            if not departments and row_data is not None:
+                departments = [str(row_data.get("Departamento", "")).strip()]
+            row_data = {
+                "ID de persona": employee_id,
+                "Nombre": employee_name,
+                "Fecha": work_date,
+                "Departamento": " / ".join([d for d in departments if d]),
+                "Tramos trabajados": "",
+                "Minutos reales": 0,
+                "Minutos redondeados": 0,
+                "Minutos extra": 0,
+                "Horas extra": "00:00",
+                "Horas totales": "00:00",
+                "Estado": preferred_exception.title(),
+            }
+            grouped_rows.append(row_data)
+            continue
+
+        worked_minutes = int(row_data.get("Minutos redondeados", 0))
+        if worked_minutes > 0:
+            if bool(state.get("paid_exception")) and exception_types and str(
+                row_data.get("Tramos trabajados", "")
+            ).strip() == "":
+                row_data["Estado"] = preferred_exception.title()
+                grouped_rows.append(row_data)
+                continue
+            if work_date.weekday() == 6:
+                row_data["Estado"] = "Domingo"
+                grouped_rows.append(row_data)
+                continue
+            if is_flexible_attendance:
+                row_data["Estado"] = "Normal"
+                grouped_rows.append(row_data)
+                continue
+            # Con fichadas validas no debe clasificarse Ausente.
+            first_entry_minutes = day_first_entry_minutes.get(day_key)
+            if work_date.weekday() == 5 and first_entry_minutes is not None:
+                # Regla sabado: horario fijo 07:30 para todos.
+                status = "Tarde" if first_entry_minutes > SATURDAY_START_MINUTE else "Normal"
+            else:
+                scheduled_start = scheduled_start_minute_by_employee.get(str(employee_id).strip())
+                if scheduled_start is not None and first_entry_minutes is not None:
+                    status = "Tarde" if first_entry_minutes > int(scheduled_start) else "Normal"
+                else:
+                    status = "Tarde" if bool(state.get("late")) else "Normal"
+        else:
+            if exception_types:
+                status = preferred_exception.title()
+            elif bool(state.get("absent")) and not is_flexible_attendance:
+                status = "Ausente"
+            elif bool(state.get("late")) and not is_flexible_attendance:
+                status = "Tarde"
+            else:
+                status = "Normal"
+
+        row_data["Estado"] = status
+        grouped_rows.append(row_data)
+
+    return grouped_rows, extra_inconsistencies
+
+
+# ---------------------------------------------------------------------------
+# Función principal (orquestador)
+# ---------------------------------------------------------------------------
+
+def process_punches(
+    df: pd.DataFrame,
+    exceptions: list[WorkException] | None = None,
+    scheduled_minutes_by_employee: dict[str, int] | None = None,
+    scheduled_start_minute_by_employee: dict[str, int] | None = None,
+    working_weekdays_by_employee: dict[str, set[int]] | None = None,
+    split_schedule_by_employee: dict[str, dict[str, int | bool | None]] | None = None,
+    flexible_attendance_employee_ids: set[str] | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    # --- Valores por defecto ---
+    exceptions = exceptions or []
+    scheduled_minutes_by_employee = scheduled_minutes_by_employee or {}
+    scheduled_start_minute_by_employee = scheduled_start_minute_by_employee or {}
+    working_weekdays_by_employee = working_weekdays_by_employee or {}
+    split_schedule_by_employee = split_schedule_by_employee or {}
+    flexible_attendance_employee_ids = {
+        str(v).strip() for v in (flexible_attendance_employee_ids or set()) if str(v).strip() != ""
+    }
+    has_schedule_reference = bool(scheduled_minutes_by_employee)
+    exceptions_index = build_exception_index(exceptions)
+
+    # --- Paso 1: parsear todas las filas del reporte ---
+    (
+        valid_segments,
+        inconsistencies,
+        partial_day_punches,
+        day_flags,
+        employee_name_by_id,
+        departments_by_id,
+        used_exception_keys,
+    ) = _parse_punch_rows(
+        df,
+        exceptions_index,
+        scheduled_minutes_by_employee,
+        working_weekdays_by_employee,
+        flexible_attendance_employee_ids,
+        has_schedule_reference,
+    )
+
+    # --- Paso 2: identificar días con horario partido y solo 2 fichadas ---
+    (
+        split_two_punch_days,
+        actual_first_entry_minutes_by_day,
+        actual_first_entry_by_day,
+        actual_last_exit_by_day,
+    ) = _find_split_two_punch_days(partial_day_punches, split_schedule_by_employee)
+
+    # --- Paso 3: suprimir inconsistencias provocadas por días de horario partido ---
+    if split_two_punch_days:
+        suppress_map = {
+            day_key: {"Falta Registro de entrada", "Falta Registro de salida"}
+            for day_key in split_two_punch_days
+        }
+        inconsistencies = _suppress_inconsistencies(inconsistencies, suppress_map)
+
+    # --- Paso 4: reconstruir tramos (horario partido, entrada sola, consolidación) ---
+    (
+        valid_segments,
+        day_flags,
+        _existing_day_keys,
+        inferred_entry_only_days,
+        actual_first_entry_minutes_by_day,
+    ) = _rebuild_segments(
+        valid_segments,
+        partial_day_punches,
+        day_flags,
+        split_two_punch_days,
+        actual_first_entry_minutes_by_day,
+        actual_first_entry_by_day,
+        actual_last_exit_by_day,
+        split_schedule_by_employee,
+    )
+
+    # --- Paso 5: suprimir inconsistencias de días con solo entrada inferida ---
+    if inferred_entry_only_days:
+        suppress_map_entry_only = {
+            day_key: {"Falta Registro de salida"}
+            for day_key in inferred_entry_only_days
+        }
+        inconsistencies = _suppress_inconsistencies(inconsistencies, suppress_map_entry_only)
+
+    # --- Paso 6: inyectar días de excepción sin fila Hikvision (feriados, ausencias) ---
+    known_employee_ids: set[str] = set(employee_name_by_id.keys()) | {
+        str(emp_id).strip() for emp_id in scheduled_minutes_by_employee.keys()
+    }
+    exception_inconsistencies = _inject_exception_days(
+        exceptions,
+        used_exception_keys,
+        known_employee_ids,
+        employee_name_by_id,
+        departments_by_id,
+        day_flags,
+    )
+    inconsistencies.extend(exception_inconsistencies)
+
+    # --- Paso 7: construir DataFrames diario y mensual ---
     segments_df = pd.DataFrame(valid_segments)
 
     if segments_df.empty and not day_flags:
@@ -910,292 +1322,30 @@ def process_punches(
         if segments_df.empty:
             segments_df = pd.DataFrame(
                 columns=[
-                    "employee_id",
-                    "employee_name",
-                    "department",
-                    "work_date",
-                    "entry_dt",
-                    "exit_dt",
-                    "schedule",
-                    "real_minutes",
-                    "rounded_minutes",
+                    "employee_id", "employee_name", "department", "work_date",
+                    "entry_dt", "exit_dt", "schedule", "real_minutes", "rounded_minutes",
                 ]
             )
 
         segments_df = segments_df.sort_values(
-            ["employee_id", "work_date", "entry_dt", "schedule"],
-            kind="stable",
+            ["employee_id", "work_date", "entry_dt", "schedule"], kind="stable"
         ).reset_index(drop=True)
 
-        day_rows: dict[tuple[str, str, date], dict] = {}
-        day_first_entry_minutes: dict[tuple[str, str, date], int] = {}
-        for (employee_id, employee_name, work_date), group in segments_df.groupby(
-            ["employee_id", "employee_name", "work_date"],
-            sort=True,
-        ):
-            day_key = (str(employee_id), str(employee_name), work_date)
-            departments = [d for d in group["department"].astype(str).str.strip().unique() if d]
-            department_value = " / ".join(departments)
-
-            segments_text: list[str] = []
-            for _, segment in group.iterrows():
-                segments_text.append(_format_segment_text(segment))
-
-            real_total = int(group["real_minutes"].sum())
-            rounded_total = int(group["rounded_minutes"].sum())
-            if work_date.weekday() == 5:
-                saturday_first_entry = actual_first_entry_by_day.get(day_key, group["entry_dt"].min())
-                saturday_last_exit = actual_last_exit_by_day.get(day_key, group["exit_dt"].max())
-                if isinstance(saturday_first_entry, datetime) and isinstance(saturday_last_exit, datetime):
-                    if saturday_last_exit > saturday_first_entry:
-                        real_total = int(round((saturday_last_exit - saturday_first_entry).total_seconds() / 60))
-                        rounded_total = _floor_to_30(real_total)
-                        segments_text = [
-                            (
-                                f"{saturday_first_entry.strftime('%H:%M')}-{saturday_last_exit.strftime('%H:%M')} "
-                                f"[07:30-11:30]"
-                            )
-                        ]
-            first_entry = group["entry_dt"].min()
-            first_entry_minutes = first_entry.hour * 60 + first_entry.minute
-            if day_key in actual_first_entry_minutes_by_day:
-                first_entry_minutes = int(actual_first_entry_minutes_by_day[day_key])
-            day_first_entry_minutes[(str(employee_id), str(employee_name), work_date)] = first_entry_minutes
-            employee_days = working_weekdays_by_employee.get(str(employee_id).strip(), {0, 1, 2, 3, 4})
-            employee_profile = split_schedule_by_employee.get(str(employee_id).strip(), {})
-            is_flexible_attendance = str(employee_id).strip() in flexible_attendance_employee_ids
-            if is_flexible_attendance:
-                overtime_minutes = 0
-            elif work_date.weekday() in {5, 6} or work_date.weekday() not in employee_days:
-                overtime_minutes = rounded_total
-            elif day_key in split_two_punch_days:
-                overtime_minutes = 0
-            else:
-                scheduled_minutes = scheduled_minutes_by_employee.get(str(employee_id).strip())
-                if scheduled_minutes is None:
-                    overtime_minutes = 0
-                    if has_schedule_reference:
-                        _inconsistency(
-                            inconsistencies,
-                            str(employee_id),
-                            str(employee_name),
-                            work_date,
-                            "Horario no definido",
-                            "No hay horario configurado en info.xlsx para calcular horas extra.",
-                        )
-                else:
-                    overtime_by_segment = _overtime_minutes_by_segment(group)
-                    if overtime_by_segment is not None:
-                        overtime_minutes = overtime_by_segment
-                    else:
-                        overtime_minutes = _floor_to_30(max(0, real_total - int(scheduled_minutes)))
-
-            # Caso solicitado: horario corrido sin horas extra (por horario ajustado).
-            # Mostrar solo una linea con real y modificado esperado.
-            if (
-                bool(employee_profile.get("is_continuous", False))
-                and overtime_minutes == 0
-                and len(group) == 1
-            ):
-                expected_start_min = employee_profile.get("morning_in_minute")
-                if expected_start_min is None:
-                    expected_start_min = employee_profile.get("afternoon_in_minute")
-                expected_end_min = employee_profile.get("afternoon_out_minute")
-                if expected_end_min is None:
-                    expected_end_min = employee_profile.get("morning_out_minute")
-
-                expected_start_dt = _minute_to_datetime(work_date, expected_start_min)
-                expected_end_dt = _minute_to_datetime(work_date, expected_end_min)
-                real_start_dt = group.iloc[0]["entry_dt"]
-                real_end_dt = group.iloc[0]["exit_dt"]
-
-                if (
-                    isinstance(real_start_dt, datetime)
-                    and isinstance(real_end_dt, datetime)
-                    and expected_start_dt is not None
-                    and expected_end_dt is not None
-                    and expected_end_dt > expected_start_dt
-                ):
-                    segments_text = [
-                        _format_real_expected_range(
-                            real_start_dt,
-                            real_end_dt,
-                            expected_start_dt,
-                            expected_end_dt,
-                        )
-                    ]
-
-            day_rows[(str(employee_id), str(employee_name), work_date)] = {
-                "ID de persona": employee_id,
-                "Nombre": employee_name,
-                "Fecha": work_date,
-                "Departamento": department_value,
-                "Tramos trabajados": " ||| ".join(segments_text),
-                "Minutos reales": real_total,
-                "Minutos redondeados": rounded_total,
-                "Minutos extra": overtime_minutes,
-                "Horas extra": _minutes_to_hhmm(overtime_minutes),
-                "Horas totales": _minutes_to_hhmm(rounded_total),
-            }
-
-        grouped_rows: list[dict] = []
-        all_day_keys = sorted(
-            set(day_rows.keys()) | set(day_flags.keys()),
-            key=lambda k: (k[0], k[2], k[1]),
+        grouped_rows, row_inconsistencies = _build_daily_rows(
+            segments_df,
+            day_flags,
+            split_two_punch_days,
+            actual_first_entry_minutes_by_day,
+            actual_first_entry_by_day,
+            actual_last_exit_by_day,
+            scheduled_minutes_by_employee,
+            scheduled_start_minute_by_employee,
+            working_weekdays_by_employee,
+            split_schedule_by_employee,
+            flexible_attendance_employee_ids,
+            has_schedule_reference,
         )
-        for day_key in all_day_keys:
-            employee_id, employee_name, work_date = day_key
-            is_flexible_attendance = str(employee_id).strip() in flexible_attendance_employee_ids
-            state = day_flags.get(
-                day_key,
-                {
-                    "late": False,
-                    "absent": False,
-                    "departments": set(),
-                    "exception_types": [],
-                    "paid_exception": False,
-                },
-            )
-            row_data = day_rows.get(day_key)
-            exception_types = [str(value).strip() for value in (state.get("exception_types") or []) if str(value).strip() != ""]
-            exception_types_lower = [value.lower() for value in exception_types]
-            has_presente = "presente" in exception_types_lower
-            has_non_presente_exception = any(value != "presente" for value in exception_types_lower)
-            suppress_presente_by_saturday_exception = (
-                work_date.weekday() == 5 and has_presente and has_non_presente_exception
-            )
-            apply_presente = has_presente and not suppress_presente_by_saturday_exception
-            preferred_exception = exception_types[0] if exception_types else "Normal"
-            if suppress_presente_by_saturday_exception:
-                preferred_exception = next(
-                    (value for value in exception_types if value.strip().lower() != "presente"),
-                    preferred_exception,
-                )
-            saturday_has_exception = work_date.weekday() == 5 and bool(exception_types)
-
-            if row_data is None:
-                if (
-                    not bool(state.get("absent"))
-                    and not bool(state.get("late"))
-                    and not state.get("exception_types")
-                ):
-                    continue
-                departments = sorted([d for d in state["departments"] if str(d).strip() != ""])
-                paid_exception = bool(state.get("paid_exception"))
-                scheduled_minutes = scheduled_minutes_by_employee.get(str(employee_id).strip(), 0)
-                if apply_presente:
-                    paid_minutes = int(scheduled_minutes) if int(scheduled_minutes) > 0 else 0
-                else:
-                    paid_minutes = int(scheduled_minutes) if paid_exception and int(scheduled_minutes) > 0 else 0
-                row_data = {
-                    "ID de persona": employee_id,
-                    "Nombre": employee_name,
-                    "Fecha": work_date,
-                    "Departamento": " / ".join(departments),
-                    "Tramos trabajados": "",
-                    "Minutos reales": paid_minutes,
-                    "Minutos redondeados": paid_minutes,
-                    "Minutos extra": 0,
-                    "Horas extra": "00:00",
-                    "Horas totales": _minutes_to_hhmm(paid_minutes),
-                }
-            elif apply_presente:
-                # Regla: si hay PRESENTE en date.xlsx, ignora fichadas reales del dia.
-                scheduled_minutes = int(scheduled_minutes_by_employee.get(str(employee_id).strip(), 0) or 0)
-                row_data = {
-                    "ID de persona": employee_id,
-                    "Nombre": employee_name,
-                    "Fecha": work_date,
-                    "Departamento": row_data.get("Departamento", ""),
-                    "Tramos trabajados": "",
-                    "Minutos reales": scheduled_minutes,
-                    "Minutos redondeados": scheduled_minutes,
-                    "Minutos extra": 0,
-                    "Horas extra": "00:00",
-                    "Horas totales": _minutes_to_hhmm(scheduled_minutes),
-                }
-            elif suppress_presente_by_saturday_exception:
-                # Sabado con excepcion real en date.xlsx: ignora fichadas y procesa por excepcion.
-                departments = sorted([d for d in state["departments"] if str(d).strip() != ""])
-                if not departments and row_data is not None:
-                    departments = [str(row_data.get("Departamento", "")).strip()]
-                paid_exception = bool(state.get("paid_exception"))
-                scheduled_minutes = int(scheduled_minutes_by_employee.get(str(employee_id).strip(), 0) or 0)
-                paid_minutes = scheduled_minutes if paid_exception and scheduled_minutes > 0 else 0
-                row_data = {
-                    "ID de persona": employee_id,
-                    "Nombre": employee_name,
-                    "Fecha": work_date,
-                    "Departamento": " / ".join([d for d in departments if d]),
-                    "Tramos trabajados": "",
-                    "Minutos reales": paid_minutes,
-                    "Minutos redondeados": paid_minutes,
-                    "Minutos extra": 0,
-                    "Horas extra": "00:00",
-                    "Horas totales": _minutes_to_hhmm(paid_minutes),
-                }
-            if saturday_has_exception:
-                departments = sorted([d for d in state["departments"] if str(d).strip() != ""])
-                if not departments and row_data is not None:
-                    departments = [str(row_data.get("Departamento", "")).strip()]
-                row_data = {
-                    "ID de persona": employee_id,
-                    "Nombre": employee_name,
-                    "Fecha": work_date,
-                    "Departamento": " / ".join([d for d in departments if d]),
-                    "Tramos trabajados": "",
-                    "Minutos reales": 0,
-                    "Minutos redondeados": 0,
-                    "Minutos extra": 0,
-                    "Horas extra": "00:00",
-                    "Horas totales": "00:00",
-                    "Estado": preferred_exception.title(),
-                }
-                grouped_rows.append(row_data)
-                continue
-
-            worked_minutes = int(row_data.get("Minutos redondeados", 0))
-            if worked_minutes > 0:
-                if bool(state.get("paid_exception")) and exception_types and str(
-                    row_data.get("Tramos trabajados", "")
-                ).strip() == "":
-                    status = preferred_exception.title()
-                    row_data["Estado"] = status
-                    grouped_rows.append(row_data)
-                    continue
-                if work_date.weekday() == 6:
-                    status = "Domingo"
-                    row_data["Estado"] = status
-                    grouped_rows.append(row_data)
-                    continue
-                if is_flexible_attendance:
-                    status = "Normal"
-                    row_data["Estado"] = status
-                    grouped_rows.append(row_data)
-                    continue
-                # Con fichadas validas no debe clasificarse Ausente.
-                first_entry_minutes = day_first_entry_minutes.get(day_key)
-                if work_date.weekday() == 5 and first_entry_minutes is not None:
-                    # Regla sabado: horario fijo 07:30 para todos.
-                    status = "Tarde" if first_entry_minutes > SATURDAY_START_MINUTE else "Normal"
-                else:
-                    scheduled_start = scheduled_start_minute_by_employee.get(str(employee_id).strip())
-                    if scheduled_start is not None and first_entry_minutes is not None:
-                        status = "Tarde" if first_entry_minutes > int(scheduled_start) else "Normal"
-                    else:
-                        status = "Tarde" if bool(state.get("late")) else "Normal"
-            else:
-                if exception_types:
-                    status = preferred_exception.title()
-                elif bool(state.get("absent")) and not is_flexible_attendance:
-                    status = "Ausente"
-                elif bool(state.get("late")) and not is_flexible_attendance:
-                    status = "Tarde"
-                else:
-                    status = "Normal"
-
-            row_data["Estado"] = status
-            grouped_rows.append(row_data)
+        inconsistencies.extend(row_inconsistencies)
 
         diario_df = pd.DataFrame(grouped_rows, columns=DIARIO_COLUMNS)
         diario_df = diario_df.sort_values(
@@ -1227,11 +1377,7 @@ def process_punches(
     inconsistencias_df = pd.DataFrame(inconsistencies, columns=INCONSISTENCIAS_COLUMNS)
     if not inconsistencias_df.empty:
         inconsistencias_df = inconsistencias_df.sort_values(
-            ["ID de persona", "Fecha", "Nombre", "Tipo de inconsistencia"],
-            kind="stable",
+            ["ID de persona", "Fecha", "Nombre", "Tipo de inconsistencia"], kind="stable"
         ).reset_index(drop=True)
 
     return diario_df, mensual_df, inconsistencias_df
-
-
-

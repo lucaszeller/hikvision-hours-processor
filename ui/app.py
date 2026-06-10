@@ -32,7 +32,6 @@ try:
 except Exception:  # pragma: no cover - optional dependency at runtime
     Calendar = None
 
-DEFAULT_EXCEPTIONS_FILENAME = "feriados_nacionales_argentina_2026.xlsx"
 DEFAULT_ABSENCE_TYPES = [
     "DOMINGO",
     "AUSENCIA",
@@ -1558,21 +1557,11 @@ class HikvisionApp(ctk.CTk):
             )
         self._refresh_context_panel()
 
-    def _default_exceptions_path(self) -> Path:
-        return get_app_base_dir() / DEFAULT_EXCEPTIONS_FILENAME
-
     def _initialize_default_exceptions_file(self) -> None:
-        default_path = self._default_exceptions_path()
-        try:
-            ensure_exceptions_file(default_path)
-        except ExceptionConfigError as exc:
-            self.log(f"No se pudo inicializar archivo de excepciones por defecto: {exc}")
-            return
-
-        self.exceptions_file = default_path
-        self._set_exceptions_file_entry(str(self.exceptions_file))
-        self._refresh_exceptions_summary()
-        self.log(f"Archivo de excepciones por defecto: {self.exceptions_file}")
+        # El archivo de feriados por defecto ya no se usa; las excepciones se
+        # cargan desde date.xlsx (hoja Ausencias). Este método se mantiene para
+        # no romper los llamados existentes pero no hace nada.
+        pass
 
     def _manual_text_from_box(self) -> str:
         return self.exceptions_manual_box.get("1.0", "end").strip() if self.exceptions_manual_box else ""
@@ -1589,12 +1578,12 @@ class HikvisionApp(ctk.CTk):
         self._refresh_exceptions_summary()
 
     def _persist_manual_exceptions(self) -> int:
-        if self.exceptions_file is None:
-            raise ExceptionConfigError("No hay archivo de excepciones seleccionado.")
-
         manual_text = self._manual_text_from_box()
         if self._count_manual_exceptions(manual_text) == 0:
             return 0
+
+        if self.exceptions_file is None:
+            raise ExceptionConfigError("No hay archivo de excepciones seleccionado.")
 
         added_count = append_manual_exceptions_to_file(self.exceptions_file, manual_text)
         self._reset_manual_box_to_template()

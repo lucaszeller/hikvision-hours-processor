@@ -16,7 +16,6 @@ Aplicacion interna en Python para procesar reportes de horas de Hikvision/iVMS-4
 
 ## Excepciones
 
-- Por defecto la app usa `feriados_nacionales_argentina_2026.xlsx` (en la carpeta del proyecto).
 - Si existe `date.xlsx` con hoja `Ausencias`, esas ausencias se cargan automaticamente al procesar.
   - Requiere columnas: `Legajo`, `Tipo ausencia`, `Fecha desde`.
   - Opcionales: `Fecha hasta`, `Estado`, `Observación`.

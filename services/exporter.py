@@ -275,6 +275,215 @@ def _load_working_weekdays_catalog(base_dir: Path) -> dict[str, set[int]]:
     return {}
 
 
+def _build_tardanzas_sheet(daily_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Construye la hoja Tardanzas: una fila por cada día con Estado=Tarde,
+    mostrando hora esperada, hora real y minutos de retraso.
+    """
+    cols = ["ID de persona", "Nombre", "Fecha", "Departamento", "Hora esperada", "Hora real", "Min tarde"]
+    if daily_df.empty:
+        return pd.DataFrame(columns=cols)
+
+    needed = {"ID de persona", "Nombre", "Fecha", "Estado", "Tramos trabajados"}
+    if not needed.issubset(set(daily_df.columns)):
+        return pd.DataFrame(columns=cols)
+
+    working = daily_df.copy()
+    working["_estado_norm"] = working["Estado"].map(_normalize_status)
+    tardy = working[working["_estado_norm"].isin({"tarde", "tardanza"})].copy()
+    if tardy.empty:
+        return pd.DataFrame(columns=cols)
+
+    # Parsear tramos: "07:35-12:00 [07:30-12:00]" → real=07:35, esperado=07:30
+    import re as _re
+    def _parse_tramo(tramos_text: str) -> tuple[str, str, int]:
+        text = str(tramos_text or "").strip()
+        # Primer tramo del día (puede haber varios separados por |||)
+        first = text.split("|||")[0].strip()
+        # Hora real de entrada: primer HH:MM antes del guión
+        real_match = _re.match(r"(\d{2}:\d{2})", first)
+        real_start = real_match.group(1) if real_match else ""
+        # Hora esperada: primer HH:MM dentro de corchetes
+        exp_match = _re.search(r"\[(\d{2}:\d{2})", first)
+        exp_start = exp_match.group(1) if exp_match else ""
+        # Minutos tarde
+        if real_start and exp_start:
+            try:
+                rh, rm = map(int, real_start.split(":"))
+                eh, em = map(int, exp_start.split(":"))
+                diff = (rh * 60 + rm) - (eh * 60 + em)
+                return exp_start, real_start, max(0, diff)
+            except ValueError:
+                pass
+        return exp_start, real_start, 0
+
+    parsed = tardy["Tramos trabajados"].apply(_parse_tramo)
+    tardy["Hora esperada"] = [p[0] for p in parsed]
+    tardy["Hora real"] = [p[1] for p in parsed]
+    tardy["Min tarde"] = [p[2] for p in parsed]
+
+    result = tardy[["ID de persona", "Nombre", "Fecha", "Departamento",
+                     "Hora esperada", "Hora real", "Min tarde"]].copy()
+    result = result.sort_values(["ID de persona", "Fecha"], kind="stable").reset_index(drop=True)
+    return result
+
+
+def _build_resumen_sheet(daily_df: pd.DataFrame, monthly_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Construye una tabla de dos columnas (Concepto / Valor) con los KPIs del mes.
+    """
+    rows: list[dict] = []
+
+    def _add(concepto: str, valor: object) -> None:
+        rows.append({"Concepto": concepto, "Valor": valor})
+
+    def _sep(titulo: str = "") -> None:
+        rows.append({"Concepto": titulo, "Valor": None})
+
+    if daily_df.empty:
+        _add("Sin datos", "")
+        return pd.DataFrame(rows)
+
+    working = daily_df.copy()
+    working["_estado_norm"] = working["Estado"].map(_normalize_status)
+    working["_fecha_dt"] = pd.to_datetime(working["Fecha"], errors="coerce")
+
+    # --- Período ---
+    fechas = working["_fecha_dt"].dropna()
+    if not fechas.empty:
+        mes_label = fechas.min().strftime("%B %Y").capitalize()
+        fecha_desde = fechas.min().strftime("%d/%m/%Y")
+        fecha_hasta = fechas.max().strftime("%d/%m/%Y")
+    else:
+        mes_label = ""
+        fecha_desde = fecha_hasta = ""
+
+    _sep("── PERÍODO ──")
+    _add("Mes", mes_label)
+    _add("Desde", fecha_desde)
+    _add("Hasta", fecha_hasta)
+
+    # --- Empleados ---
+    total_empleados = working["ID de persona"].nunique()
+    _sep("")
+    _sep("── EMPLEADOS ──")
+    _add("Empleados en el reporte", total_empleados)
+
+    # --- Asistencia ---
+    attendance_norms = {"normal", "tarde", "tardanza", "domingo"}
+    dias_trabajados = int(working[working["_estado_norm"].isin(attendance_norms)].shape[0])
+    tardanzas = int(working[working["_estado_norm"].isin({"tarde", "tardanza"})].shape[0])
+    ausentes = int(working[working["_estado_norm"].isin({"ausente", "ausencia"})].shape[0])
+    _sep("")
+    _sep("── ASISTENCIA ──")
+    _add("Días trabajados (Normal + Tarde)", dias_trabajados)
+    _add("Tardanzas", tardanzas)
+    _add("Ausencias", ausentes)
+
+    # --- Horas ---
+    if not monthly_df.empty and "Minutos totales" in monthly_df.columns:
+        total_min_normales = int(monthly_df["Minutos totales"].sum())
+        total_min_extra = int(monthly_df["Minutos extra"].sum()) if "Minutos extra" in monthly_df.columns else 0
+    else:
+        total_min_normales = int(working["Minutos redondeados"].sum()) if "Minutos redondeados" in working.columns else 0
+        total_min_extra = int(working["Minutos extra"].sum()) if "Minutos extra" in working.columns else 0
+
+    _sep("")
+    _sep("── HORAS ──")
+    _add("Horas normales totales", _minutes_to_hhmm(total_min_normales))
+    _add("Horas extra totales", _minutes_to_hhmm(total_min_extra))
+
+    # --- Excepciones ---
+    excepciones_mask = ~working["_estado_norm"].isin(attendance_norms | {"ausente", "ausencia", ""})
+    excepciones = working[excepciones_mask]["_estado_norm"].value_counts()
+    if not excepciones.empty:
+        _sep("")
+        _sep("── EXCEPCIONES ──")
+        for exc_tipo, count in excepciones.items():
+            _add(str(exc_tipo).title(), int(count))
+
+    # --- Por departamento ---
+    if "Departamento" in working.columns:
+        dept_trabajados = (
+            working[working["_estado_norm"].isin(attendance_norms)]
+            .groupby("Departamento")["_estado_norm"]
+            .count()
+            .sort_values(ascending=False)
+        )
+        if not dept_trabajados.empty:
+            _sep("")
+            _sep("── DÍAS TRABAJADOS POR SECTOR ──")
+            for dept, count in dept_trabajados.items():
+                if str(dept).strip():
+                    _add(str(dept), int(count))
+
+    return pd.DataFrame(rows)
+
+
+def _apply_tardanzas_format(worksheet) -> None:
+    widths = [14, 28, 12, 22, 16, 16, 14]
+    for col_idx, width in enumerate(widths, start=1):
+        worksheet.column_dimensions[get_column_letter(col_idx)].width = width
+
+    worksheet.freeze_panes = "A2"
+    worksheet.auto_filter.ref = worksheet.dimensions
+
+    for cell in worksheet[1]:
+        cell.fill = HEADER_FILL
+        cell.font = HEADER_FONT
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+        cell.border = THIN_BORDER
+
+    late_fill = STATUS_STYLES["tarde"]["fill"]
+    late_font = STATUS_STYLES["tarde"]["font"]
+
+    for row_idx in range(2, worksheet.max_row + 1):
+        for col_idx in range(1, 8):
+            cell = worksheet.cell(row=row_idx, column=col_idx)
+            cell.fill = late_fill if late_fill else (ALT_ROW_FILL if row_idx % 2 == 0 else PatternFill())
+            cell.font = late_font if late_font else Font()
+            cell.border = THIN_BORDER
+            horizontal = "left" if col_idx in {2, 4} else "center"
+            cell.alignment = Alignment(horizontal=horizontal, vertical="center")
+            if col_idx == 3 and cell.value not in ("", None):
+                cell.number_format = "DD/MM/YYYY"
+
+
+def _apply_resumen_format(worksheet) -> None:
+    worksheet.column_dimensions["A"].width = 36
+    worksheet.column_dimensions["B"].width = 20
+
+    section_fill = PatternFill("solid", fgColor="1F4E78")
+    section_font = Font(color="FFFFFF", bold=True)
+    value_fill_even = ALT_ROW_FILL
+
+    for row_idx in range(1, worksheet.max_row + 1):
+        concepto_cell = worksheet.cell(row=row_idx, column=1)
+        value_cell = worksheet.cell(row=row_idx, column=2)
+        concepto = str(concepto_cell.value or "")
+
+        if concepto.startswith("──"):
+            # Fila de sección
+            concepto_cell.fill = section_fill
+            concepto_cell.font = section_font
+            value_cell.fill = section_fill
+            concepto_cell.alignment = Alignment(horizontal="left", vertical="center")
+            value_cell.alignment = Alignment(horizontal="left", vertical="center")
+            concepto_cell.border = THIN_BORDER
+            value_cell.border = THIN_BORDER
+        elif concepto == "":
+            # Fila vacía separadora
+            pass
+        else:
+            fill = value_fill_even if row_idx % 2 == 0 else PatternFill()
+            concepto_cell.fill = fill
+            value_cell.fill = fill
+            concepto_cell.alignment = Alignment(horizontal="left", vertical="center")
+            value_cell.alignment = Alignment(horizontal="center", vertical="center")
+            concepto_cell.border = THIN_BORDER
+            value_cell.border = THIN_BORDER
+
+
 def _build_incidencias_tables(
     daily_df: pd.DataFrame,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -847,34 +1056,6 @@ def _append_liquidar_legend(worksheet, avoid_dark_green: bool = False) -> None:
         end_row=start_row,
         end_column=4,
     )
-    for col in range(1, 5):
-        worksheet.cell(row=start_row, column=col).border = THIN_BORDER
-
-    for idx, (label, status_key) in enumerate(legend_items):
-        row_idx = start_row + 1 + (idx // 2)
-        if idx % 2 == 0:
-            box_col, text_col = 1, 2
-        else:
-            box_col, text_col = 3, 4
-
-        box = worksheet.cell(row=row_idx, column=box_col)
-        text = worksheet.cell(row=row_idx, column=text_col)
-        resolved_status_key = status_key
-        if avoid_dark_green and status_key in {"tarde", "tardanza"}:
-            resolved_status_key = "normal"
-        style = _status_style(resolved_status_key)
-
-        box.value = ""
-        box.border = THIN_BORDER
-        fill = style.get("fill")
-        if fill is not None:
-            box.fill = fill
-
-        text.value = label
-        text.border = THIN_BORDER
-        text.alignment = Alignment(horizontal="left", vertical="center")
-        text.font = Font(color="000000", bold=True)
-
 
 def _apply_incidencias_format(worksheet, summary_rows: int, detail_header_row: int) -> None:
     headers_row_1 = [cell.value for cell in worksheet[1]]
@@ -1009,6 +1190,8 @@ def export_report(
 
     diario_export = _sort_for_report(daily_df.copy(), SHEET_LAYOUTS["Diario"]["priority_sort"])
     mensual_export = _sort_for_report(monthly_df.copy(), SHEET_LAYOUTS["Mensual"]["priority_sort"])
+    tardanzas_export = _build_tardanzas_sheet(diario_export)
+    resumen_export = _build_resumen_sheet(diario_export, mensual_export)
     incidencias_summary, incidencias_detail = _build_incidencias_tables(diario_export)
     liquidar_export, liquidar_status_cells = _build_liquidar_sheet(
         diario_export,
@@ -1034,6 +1217,9 @@ def export_report(
         with pd.ExcelWriter(temp_output, engine="openpyxl") as writer:
             diario_export.to_excel(writer, sheet_name="Diario", index=False)
             mensual_export.to_excel(writer, sheet_name="Mensual", index=False)
+            resumen_export.to_excel(writer, sheet_name="Resumen", index=False)
+            if not tardanzas_export.empty:
+                tardanzas_export.to_excel(writer, sheet_name="Tardanzas", index=False)
             incidencias_summary.to_excel(writer, sheet_name=INCIDENCIAS_SHEET, index=False)
             detail_startrow = len(incidencias_summary) + 3
             incidencias_detail.to_excel(
@@ -1048,6 +1234,9 @@ def export_report(
             workbook = writer.book
             for sheet_name in ("Diario", "Mensual"):
                 _apply_sheet_format(workbook[sheet_name], sheet_name)
+            _apply_resumen_format(workbook["Resumen"])
+            if "Tardanzas" in workbook.sheetnames:
+                _apply_tardanzas_format(workbook["Tardanzas"])
             _apply_incidencias_format(
                 workbook[INCIDENCIAS_SHEET],
                 summary_rows=len(incidencias_summary),
