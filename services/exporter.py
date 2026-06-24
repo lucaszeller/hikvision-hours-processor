@@ -196,6 +196,8 @@ def _load_employee_catalog(base_dir: Path) -> tuple[list[tuple[str, str, str]], 
         base_dir / "date.xlsx",
         Path("date.xlsx"),
         base_dir.parent / "date.xlsx",
+        Path("dist") / "date.xlsx",
+        base_dir / "dist" / "date.xlsx",
         base_dir / "info.xlsx",
         Path("info.xlsx"),
         base_dir.parent / "info.xlsx",
@@ -697,6 +699,11 @@ def _build_liquidar_sheet(
                 item for item in employees
                 if _normalize_person_name(item[1]) in allowed_norm
             ]
+        if contratacion_required and contratacion_by_id:
+            employees = [
+                item for item in employees
+                if contratacion_by_id.get(item[0], "").strip()
+            ]
         def _liquidar_sort_key(item: tuple) -> tuple:
             emp_id = item[0]
             c = contratacion_by_id.get(emp_id, "").strip().lower()
@@ -711,6 +718,11 @@ def _build_liquidar_sheet(
             except ValueError:
                 return (order, 0, emp_id)
         employees.sort(key=_liquidar_sort_key)
+        if contratacion_separator:
+            _n_quincenal = sum(
+                1 for item in employees
+                if contratacion_by_id.get(item[0], "").strip().lower() == "quincenal"
+            )
     employee_labels = [item[2] for item in employees]
     working_days_by_employee = (
         _load_working_weekdays_catalog(base_dir)
@@ -1286,8 +1298,6 @@ def export_report(
     hs_riorda_export, hs_riorda_status_cells = _build_liquidar_sheet(
         diario_export,
         output.parent,
-        allowed_employee_names=HS_RIORDA_TARGET_NAMES,
-        forced_employees=HS_RIORDA_TARGET_EMPLOYEES_ORDERED,
         contratacion_sort=True,
         contratacion_required=True,
         contratacion_separator=True,
