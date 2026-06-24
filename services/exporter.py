@@ -191,10 +191,18 @@ def _normalize_person_name(value: object) -> str:
     return " ".join(text.strip().lower().split())
 
 
-def _load_employee_catalog(base_dir: Path) -> tuple[list[tuple[str, str, str]], bool]:
-    candidates = [base_dir / "date.xlsx", base_dir / "info.xlsx"]
+def _load_employee_catalog(base_dir: Path) -> tuple[list[tuple[str, str, str]], dict[str, str], bool]:
+    candidates = [
+        base_dir / "date.xlsx",
+        Path("date.xlsx"),
+        base_dir.parent / "date.xlsx",
+        base_dir / "info.xlsx",
+        Path("info.xlsx"),
+        base_dir.parent / "info.xlsx",
+    ]
     result: list[tuple[str, str, str]] = []
     by_id: dict[str, str] = {}
+    contratacion_by_id: dict[str, str] = {}
     loaded_from_file = False
 
     def _normalize(text: object) -> str:
@@ -239,6 +247,11 @@ def _load_employee_catalog(base_dir: Path) -> tuple[list[tuple[str, str, str]], 
         if id_col is None:
             continue
 
+        contratacion_col = None
+        for key, original in col_map.items():
+            if contratacion_col is None and "contratacion" in key:
+                contratacion_col = original
+
         for _, row in df.iterrows():
             emp_id = _clean_id(row.get(id_col, ""))
             if not emp_id:
@@ -248,13 +261,32 @@ def _load_employee_catalog(base_dir: Path) -> tuple[list[tuple[str, str, str]], 
                 emp_name = f"ID {emp_id}"
             if emp_id not in by_id:
                 by_id[emp_id] = emp_name
+            if contratacion_col is not None and emp_id not in contratacion_by_id:
+                raw_c = str(row.get(contratacion_col, "")).strip()
+                if raw_c.lower() not in {"", "nan", "none", "nat", "-"}:
+                    contratacion_by_id[emp_id] = raw_c
         loaded_from_file = True
         break
 
     for emp_id, emp_name in by_id.items():
         result.append((emp_id, emp_name, f"{emp_id} {emp_name}"))
-    result.sort(key=lambda item: (item[1].lower(), item[0]))
-    return result, loaded_from_file
+
+    def _emp_sort_key(item: tuple) -> tuple:
+        emp_id = item[0]
+        c = contratacion_by_id.get(emp_id, "").strip().lower()
+        if c == "quincenal":
+            order = 0
+        elif c == "mensual":
+            order = 1
+        else:
+            order = 2
+        try:
+            return (order, int(emp_id), "")
+        except ValueError:
+            return (order, 0, emp_id)
+
+    result.sort(key=_emp_sort_key)
+    return result, contratacion_by_id, loaded_from_file
 
 
 def _load_working_weekdays_catalog(base_dir: Path) -> dict[str, set[int]]:
@@ -324,6 +356,7 @@ def _build_tardanzas_sheet(daily_df: pd.DataFrame) -> pd.DataFrame:
 
     result = tardy[["ID de persona", "Nombre", "Fecha", "Departamento",
                      "Hora esperada", "Hora real", "Min tarde"]].copy()
+    result = result[result["Min tarde"] > 0]
     result = result.sort_values(["ID de persona", "Fecha"], kind="stable").reset_index(drop=True)
     return result
 
@@ -556,6 +589,9 @@ def _build_liquidar_sheet(
     allowed_employee_names: set[str] | None = None,
     forced_employee_names: list[str] | None = None,
     forced_employees: list[tuple[str, str]] | None = None,
+    contratacion_sort: bool = False,
+    contratacion_required: bool = False,
+    contratacion_separator: bool = False,
     include_saturdays_with_attendance: bool = True,
     include_extra_summary_rows: bool = True,
     include_total_extra_row: bool = True,
@@ -587,7 +623,7 @@ def _build_liquidar_sheet(
             return text[:-2]
         return text
 
-    catalog, loaded_from_file = _load_employee_catalog(base_dir)
+    catalog, contratacion_by_id, loaded_from_file = _load_employee_catalog(base_dir)
     from_daily: dict[str, str] = {}
     for _, row in working.iterrows():
         emp_id = _clean_id(row["ID de persona"])
@@ -604,6 +640,7 @@ def _build_liquidar_sheet(
                 catalog_by_id[emp_id] = (emp_name, f"{emp_id} {emp_name}")
 
     employees = [(emp_id, name, label) for emp_id, (name, label) in catalog_by_id.items()]
+    _n_quincenal: int | None = None
     if forced_employees:
         forced_employees_rows: list[tuple[str, str, str]] = []
         for employee_id, employee_name in forced_employees:
@@ -611,7 +648,30 @@ def _build_liquidar_sheet(
             clean_name = str(employee_name or "").strip()
             label = f"{clean_id} {clean_name}".strip() if clean_id else clean_name
             forced_employees_rows.append((clean_id, clean_name, label))
+        if contratacion_sort or contratacion_required:
+            _, _forced_contratacion, _ = _load_employee_catalog(base_dir)
+            if contratacion_required:
+                forced_employees_rows = [
+                    item for item in forced_employees_rows
+                    if _forced_contratacion.get(item[0], "").strip()
+                ]
+            if contratacion_sort:
+                def _forced_sort_key(item: tuple) -> tuple:
+                    c = _forced_contratacion.get(item[0], "").strip().lower()
+                    order = 0 if c == "quincenal" else (1 if c == "mensual" else 2)
+                    try:
+                        return (order, int(item[0]), "")
+                    except ValueError:
+                        return (order, 0, item[0])
+                forced_employees_rows.sort(key=_forced_sort_key)
         employees = forced_employees_rows
+        if contratacion_separator and (contratacion_sort or contratacion_required):
+            _n_quincenal = sum(
+                1 for item in employees
+                if _forced_contratacion.get(item[0], "").strip().lower() == "quincenal"
+            )
+        else:
+            _n_quincenal = None
     elif forced_employee_names:
         name_to_id: dict[str, str] = {}
         for emp_id, (emp_name, _) in catalog_by_id.items():
@@ -637,7 +697,20 @@ def _build_liquidar_sheet(
                 item for item in employees
                 if _normalize_person_name(item[1]) in allowed_norm
             ]
-        employees.sort(key=lambda item: (item[1].lower(), item[0]))
+        def _liquidar_sort_key(item: tuple) -> tuple:
+            emp_id = item[0]
+            c = contratacion_by_id.get(emp_id, "").strip().lower()
+            if c == "quincenal":
+                order = 0
+            elif c == "mensual":
+                order = 1
+            else:
+                order = 2
+            try:
+                return (order, int(emp_id), "")
+            except ValueError:
+                return (order, 0, emp_id)
+        employees.sort(key=_liquidar_sort_key)
     employee_labels = [item[2] for item in employees]
     working_days_by_employee = (
         _load_working_weekdays_catalog(base_dir)
@@ -914,6 +987,19 @@ def _build_liquidar_sheet(
         rows.append(total_extra_row)
 
     liquidar_df = pd.DataFrame(rows, columns=cols_base + employee_labels)
+
+    if _n_quincenal is not None and contratacion_separator and 0 < _n_quincenal < len(employee_labels):
+        sep_pos = len(cols_base) + _n_quincenal  # 0-based column index in DataFrame
+        all_cols = list(liquidar_df.columns)
+        all_cols.insert(sep_pos, "_sep_")
+        liquidar_df = liquidar_df.reindex(columns=all_cols)
+        liquidar_df["_sep_"] = ""
+        excel_sep_col = sep_pos + 1  # Excel is 1-based
+        shifted: dict[tuple[int, int], str] = {}
+        for (r, c), status in cell_status_map.items():
+            shifted[(r, c + 1 if c >= excel_sep_col else c)] = status
+        cell_status_map = shifted
+
     return liquidar_df, cell_status_map
 
 
@@ -1202,6 +1288,9 @@ def export_report(
         output.parent,
         allowed_employee_names=HS_RIORDA_TARGET_NAMES,
         forced_employees=HS_RIORDA_TARGET_EMPLOYEES_ORDERED,
+        contratacion_sort=True,
+        contratacion_required=True,
+        contratacion_separator=True,
         include_saturdays_with_attendance=False,
         include_extra_summary_rows=True,
         include_total_extra_row=True,

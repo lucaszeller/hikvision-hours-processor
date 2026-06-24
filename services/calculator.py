@@ -43,6 +43,31 @@ INCONSISTENCIAS_COLUMNS = [
 SATURDAY_START_MINUTE = 7 * 60 + 30
 SATURDAY_END_MINUTE = 11 * 60 + 30
 
+# Tipos de excepción que cuentan 8hs (480 min) en lugar del horario configurado.
+# Se comparan en minúsculas y por contenido parcial.
+EIGHT_HOUR_EXCEPTION_KEYWORDS = {
+    "vacacion",       # cubre "vacaciones", "vacación", "vacaciones anuales", etc.
+    "feriado",
+    "falta justificada",
+    "faltas justificadas",
+    "licencia",
+    "accidente",      # cubre "accidente de trabajo", "accidente laboral", etc.
+    "estudi",         # cubre "estudiar", "estudio", etc.
+    "capacitacion",   # cubre "capacitaciones", "capacitación", etc.
+    "viaje",          # cubre "viajes", "viaje de trabajo", etc.
+    "ausencia",       # ausencia aprobada (paid_day=True) paga 8hs.
+}
+EIGHT_HOUR_EXCEPTION_MINUTES = 8 * 60  # 480
+
+
+def _is_eight_hour_exception(exception_types: list[str]) -> bool:
+    """Retorna True si alguno de los tipos de excepción corresponde a jornada de 8hs."""
+    for exc_type in exception_types:
+        normalized = exc_type.strip().lower()
+        if any(keyword in normalized for keyword in EIGHT_HOUR_EXCEPTION_KEYWORDS):
+            return True
+    return False
+
 
 # ---------------------------------------------------------------------------
 # Helpers de conversión y formato
@@ -652,16 +677,25 @@ def _parse_punch_rows(
 def _find_split_two_punch_days(
     partial_day_punches: dict,
     split_schedule_by_employee: dict,
-) -> tuple[set, dict, dict, dict]:
+) -> tuple[set, set, dict, dict, dict]:
     """
     Detecta días donde el empleado tiene horario partido y solo registró
-    2 fichadas (1 entrada + 1 salida). Esos días se reconstruyen con tramos teóricos.
+    2 fichadas (1 entrada + 1 salida).
+
+    Si las 2 fichadas cubren ambos turnos → split_two_punch_days: se reconstruyen
+    tramos teóricos para mañana y tarde.
+
+    Si las 2 fichadas cubren solo un turno (solo mañana o solo tarde) →
+    partial_one_span_days: se procesan con las horas reales y se marcan como Tardanza.
+    El punto de corte es el punto medio entre fin de mañana e inicio de tarde.
 
     Retorna:
-        split_two_punch_days, actual_first_entry_minutes_by_day,
-        actual_first_entry_by_day, actual_last_exit_by_day
+        split_two_punch_days, partial_one_span_days,
+        actual_first_entry_minutes_by_day, actual_first_entry_by_day,
+        actual_last_exit_by_day
     """
     split_two_punch_days: set[tuple[str, str, date]] = set()
+    partial_one_span_days: set[tuple[str, str, date]] = set()
     actual_first_entry_minutes_by_day: dict[tuple[str, str, date], int] = {}
     actual_first_entry_by_day: dict[tuple[str, str, date], datetime] = {}
     actual_last_exit_by_day: dict[tuple[str, str, date], datetime] = {}
@@ -686,15 +720,30 @@ def _find_split_two_punch_days(
         )
         if not has_theoretical_both_spans:
             continue
-        split_two_punch_days.add(day_key)
+
         first_entry = min(entries)
         last_exit = max(exits)
-        actual_first_entry_minutes_by_day[day_key] = first_entry.hour * 60 + first_entry.minute
+        first_entry_min = first_entry.hour * 60 + first_entry.minute
+        last_exit_min = last_exit.hour * 60 + last_exit.minute
+
+        morning_out: int = int(profile["morning_out_minute"])
+        afternoon_in: int = int(profile["afternoon_in_minute"])
+        midpoint: int = (morning_out + afternoon_in) // 2
+
+        if last_exit_min <= midpoint or first_entry_min >= midpoint:
+            # Solo un turno trabajado → Tardanza, horas reales
+            partial_one_span_days.add(day_key)
+        else:
+            # Cubre ambos turnos → reconstruir tramos teóricos
+            split_two_punch_days.add(day_key)
+
+        actual_first_entry_minutes_by_day[day_key] = first_entry_min
         actual_first_entry_by_day[day_key] = first_entry
         actual_last_exit_by_day[day_key] = last_exit
 
     return (
         split_two_punch_days,
+        partial_one_span_days,
         actual_first_entry_minutes_by_day,
         actual_first_entry_by_day,
         actual_last_exit_by_day,
@@ -928,6 +977,7 @@ def _build_daily_rows(
     split_schedule_by_employee: dict,
     flexible_attendance_employee_ids: set[str],
     has_schedule_reference: bool,
+    partial_one_span_days: set | None = None,
 ) -> tuple[list[dict], list[dict]]:
     """
     Agrupa tramos por empleado/día, calcula horas extra y clasifica el estado
@@ -935,6 +985,8 @@ def _build_daily_rows(
 
     Retorna: grouped_rows, extra_inconsistencies
     """
+    if partial_one_span_days is None:
+        partial_one_span_days = set()
     extra_inconsistencies: list[dict] = []
 
     day_rows: dict[tuple[str, str, date], dict] = {}
@@ -1100,8 +1152,13 @@ def _build_daily_rows(
             scheduled_minutes = scheduled_minutes_by_employee.get(str(employee_id).strip(), 0)
             if apply_presente:
                 paid_minutes = int(scheduled_minutes) if int(scheduled_minutes) > 0 else 0
+            elif paid_exception and int(scheduled_minutes) > 0:
+                if _is_eight_hour_exception(exception_types):
+                    paid_minutes = EIGHT_HOUR_EXCEPTION_MINUTES
+                else:
+                    paid_minutes = int(scheduled_minutes)
             else:
-                paid_minutes = int(scheduled_minutes) if paid_exception and int(scheduled_minutes) > 0 else 0
+                paid_minutes = 0
             row_data = {
                 "ID de persona": employee_id,
                 "Nombre": employee_name,
@@ -1186,6 +1243,11 @@ def _build_daily_rows(
                 row_data["Estado"] = "Normal"
                 grouped_rows.append(row_data)
                 continue
+            # Horario partido con solo un turno trabajado → siempre Tardanza.
+            if day_key in partial_one_span_days:
+                row_data["Estado"] = "Tarde"
+                grouped_rows.append(row_data)
+                continue
             # Con fichadas validas no debe clasificarse Ausente.
             first_entry_minutes = day_first_entry_minutes.get(day_key)
             if work_date.weekday() == 5 and first_entry_minutes is not None:
@@ -1259,16 +1321,18 @@ def process_punches(
     # --- Paso 2: identificar días con horario partido y solo 2 fichadas ---
     (
         split_two_punch_days,
+        partial_one_span_days,
         actual_first_entry_minutes_by_day,
         actual_first_entry_by_day,
         actual_last_exit_by_day,
     ) = _find_split_two_punch_days(partial_day_punches, split_schedule_by_employee)
 
     # --- Paso 3: suprimir inconsistencias provocadas por días de horario partido ---
-    if split_two_punch_days:
+    all_two_punch_days = split_two_punch_days | partial_one_span_days
+    if all_two_punch_days:
         suppress_map = {
             day_key: {"Falta Registro de entrada", "Falta Registro de salida"}
-            for day_key in split_two_punch_days
+            for day_key in all_two_punch_days
         }
         inconsistencies = _suppress_inconsistencies(inconsistencies, suppress_map)
 
@@ -1344,6 +1408,7 @@ def process_punches(
             split_schedule_by_employee,
             flexible_attendance_employee_ids,
             has_schedule_reference,
+            partial_one_span_days=partial_one_span_days,
         )
         inconsistencies.extend(row_inconsistencies)
 

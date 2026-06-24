@@ -197,10 +197,10 @@ def test_approved_template_exception_pays_day_pending_rejected_do_not() -> None:
 
     by_date = {str(row["Fecha"]): row for _, row in daily.iterrows()}
 
-    # Aprobado: dia pago con horas normales del horario (09:00).
+    # Aprobado: "Vacaciones" paga 8hs (480 min) en lugar del horario configurado (09:00).
     assert by_date["2026-06-02"]["Estado"] == "Vacaciones"
-    assert int(by_date["2026-06-02"]["Minutos redondeados"]) == 540
-    assert by_date["2026-06-02"]["Horas totales"] == "09:00"
+    assert int(by_date["2026-06-02"]["Minutos redondeados"]) == 480
+    assert by_date["2026-06-02"]["Horas totales"] == "08:00"
     assert int(by_date["2026-06-02"]["Minutos extra"]) == 0
 
     # Pendiente/Rechazado: se muestra el estado pero no paga minutos/horas.
@@ -213,8 +213,8 @@ def test_approved_template_exception_pays_day_pending_rejected_do_not() -> None:
     assert by_date["2026-06-04"]["Horas totales"] == "00:00"
 
     assert len(monthly) == 1
-    # 06-01 trabajado 04:30 (270) + 06-02 pago 09:00 (540) = 810
-    assert int(monthly.iloc[0]["Minutos totales"]) == 810
+    # 06-01 trabajado 04:30 (270) + 06-02 Vacaciones 08:00 (480) = 750
+    assert int(monthly.iloc[0]["Minutos totales"]) == 750
 
 
 def test_global_exception_paid_day_applies_to_all_known_employees() -> None:
@@ -251,9 +251,10 @@ def test_global_exception_paid_day_applies_to_all_known_employees() -> None:
     assert len(rows_feriado) == 2
 
     by_id = {str(row["ID de persona"]): row for _, row in rows_feriado.iterrows()}
+    # "Feriado" paga 8hs (480 min) para todos, sin importar el horario configurado.
     assert by_id["20"]["Estado"] == "Feriado"
-    assert int(by_id["20"]["Minutos redondeados"]) == 540
-    assert by_id["20"]["Horas totales"] == "09:00"
+    assert int(by_id["20"]["Minutos redondeados"]) == 480
+    assert by_id["20"]["Horas totales"] == "08:00"
     assert by_id["30"]["Estado"] == "Feriado"
     assert int(by_id["30"]["Minutos redondeados"]) == 480
     assert by_id["30"]["Horas totales"] == "08:00"
@@ -1015,6 +1016,67 @@ def test_saturday_any_exception_zeroes_worked_hours() -> None:
     assert int(row["Minutos redondeados"]) == 0
     assert int(row["Minutos extra"]) == 0
     assert row["Horas totales"] == "00:00"
+
+
+def test_eight_hour_exceptions_pay_480_minutes_regardless_of_scheduled_hours() -> None:
+    """Vacaciones, Feriado y Faltas Justificadas deben sumar 8hs (480 min), no el horario configurado."""
+    # Usar días entre semana (miércoles, jueves, viernes) para evitar la regla de sábado.
+    # 2026-06-10=mie, 2026-06-11=jue, 2026-06-12=vie
+    df = pd.DataFrame(
+        {
+            "employee_id": ["20", "20", "20"],
+            "employee_name": ["Ana", "Ana", "Ana"],
+            "department": ["A", "A", "A"],
+            "schedule": ["", "", ""],
+            "work_date_raw": ["2026-06-10", "2026-06-11", "2026-06-12"],
+            "entry_time_raw": ["", "", ""],
+            "exit_time_raw": ["", "", ""],
+        }
+    )
+
+    exceptions = [
+        WorkException(
+            employee_id="20",
+            exception_date=pd.Timestamp("2026-06-10").date(),
+            exception_type="Vacaciones",
+            details="",
+            paid_day=True,
+        ),
+        WorkException(
+            employee_id="20",
+            exception_date=pd.Timestamp("2026-06-11").date(),
+            exception_type="Feriado",
+            details="",
+            paid_day=True,
+        ),
+        WorkException(
+            employee_id="20",
+            exception_date=pd.Timestamp("2026-06-12").date(),
+            exception_type="Falta Justificada",
+            details="",
+            paid_day=True,
+        ),
+    ]
+
+    daily, monthly, _ = process_punches(
+        df,
+        exceptions=exceptions,
+        scheduled_minutes_by_employee={"20": 540},  # 9hs configuradas
+        scheduled_start_minute_by_employee={"20": 450},
+    )
+
+    by_date = {str(row["Fecha"]): row for _, row in daily.iterrows()}
+
+    for date_key in ["2026-06-10", "2026-06-11", "2026-06-12"]:
+        assert int(by_date[date_key]["Minutos redondeados"]) == 480, (
+            f"{date_key} debe tener 480 min (8hs), no 540"
+        )
+        assert by_date[date_key]["Horas totales"] == "08:00"
+        assert int(by_date[date_key]["Minutos extra"]) == 0
+
+    # Mensual: 3 dias x 480 = 1440 min = 24hs
+    assert int(monthly.iloc[0]["Minutos totales"]) == 1440
+    assert monthly.iloc[0]["Horas totales"] == "24:00"
 
 
 def test_flexible_attendance_employee_does_not_get_late_or_absent_status() -> None:
