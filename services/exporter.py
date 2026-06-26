@@ -191,7 +191,33 @@ def _normalize_person_name(value: object) -> str:
     return " ".join(text.strip().lower().split())
 
 
-def _load_employee_catalog(base_dir: Path) -> tuple[list[tuple[str, str, str]], dict[str, str], bool]:
+
+def _dias_text_to_weekdays(text: str):
+    """Parse "lunes a viernes", "lunes , miercoles y viernes" etc. -> set[int] | None.
+    Returns None if the text is empty or unrecognizable.
+    Weekday ints: 0=Monday ... 6=Sunday.
+    """
+    import unicodedata as _ud
+    def _norm(s):
+        return _ud.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii").lower().strip()
+    t = _norm(str(text))
+    if not t or t in {"nan", "none", "nat", "-", ""}:
+        return None
+    day_map = {
+        "lunes": 0, "martes": 1, "miercoles": 2, "jueves": 3,
+        "viernes": 4, "sabado": 5, "domingo": 6,
+    }
+    # shorthands
+    if "lunes a sabado" in t or ("lunes" in t and "sabado" in t and " a " in t):
+        return {0, 1, 2, 3, 4, 5}
+    if "lunes a viernes" in t or ("lunes" in t and "viernes" in t and " a " in t):
+        return {0, 1, 2, 3, 4}
+    if "todos" in t:
+        return {0, 1, 2, 3, 4, 5, 6}
+    result = {idx for name, idx in day_map.items() if name in t}
+    return result if result else None
+
+def _load_employee_catalog(base_dir: Path) -> tuple[list[tuple[str, str, str]], dict[str, str], dict[str, float], dict, bool]:
     candidates = [
         base_dir / "date.xlsx",
         Path("date.xlsx"),
@@ -205,6 +231,8 @@ def _load_employee_catalog(base_dir: Path) -> tuple[list[tuple[str, str, str]], 
     result: list[tuple[str, str, str]] = []
     by_id: dict[str, str] = {}
     contratacion_by_id: dict[str, str] = {}
+    max_normal_hours_by_id: dict[str, float] = {}
+    working_days_by_id: dict = {}
     loaded_from_file = False
 
     def _normalize(text: object) -> str:
@@ -250,9 +278,15 @@ def _load_employee_catalog(base_dir: Path) -> tuple[list[tuple[str, str, str]], 
             continue
 
         contratacion_col = None
+        horas_col = None
+        dias_col = None
         for key, original in col_map.items():
             if contratacion_col is None and "contratacion" in key:
                 contratacion_col = original
+            if horas_col is None and ("horas normal" in key or "horas_normal" in key):
+                horas_col = original
+            if dias_col is None and key in {"dias", "día", "dias laborables"}:
+                dias_col = original
 
         for _, row in df.iterrows():
             emp_id = _clean_id(row.get(id_col, ""))
@@ -267,6 +301,20 @@ def _load_employee_catalog(base_dir: Path) -> tuple[list[tuple[str, str, str]], 
                 raw_c = str(row.get(contratacion_col, "")).strip()
                 if raw_c.lower() not in {"", "nan", "none", "nat", "-"}:
                     contratacion_by_id[emp_id] = raw_c
+            if horas_col is not None and emp_id not in max_normal_hours_by_id:
+                raw_h = str(row.get(horas_col, "")).strip()
+                if raw_h.lower() not in {"", "nan", "none", "nat", "-"}:
+                    try:
+                        val = float(raw_h)
+                        if val > 0:
+                            max_normal_hours_by_id[emp_id] = val
+                    except (ValueError, TypeError):
+                        pass
+            if dias_col is not None and emp_id not in working_days_by_id:
+                raw_d = str(row.get(dias_col, "")).strip()
+                parsed_days = _dias_text_to_weekdays(raw_d)
+                if parsed_days is not None:
+                    working_days_by_id[emp_id] = parsed_days
         loaded_from_file = True
         break
 
@@ -288,7 +336,7 @@ def _load_employee_catalog(base_dir: Path) -> tuple[list[tuple[str, str, str]], 
             return (order, 0, emp_id)
 
     result.sort(key=_emp_sort_key)
-    return result, contratacion_by_id, loaded_from_file
+    return result, contratacion_by_id, max_normal_hours_by_id, working_days_by_id, loaded_from_file
 
 
 def _load_working_weekdays_catalog(base_dir: Path) -> dict[str, set[int]]:
@@ -604,6 +652,7 @@ def _build_liquidar_sheet(
     fill_missing_scheduled_as_absent: bool = False,
     weekly_common_cap_minutes: int | None = None,
     include_blank_row_after_quincena: bool = False,
+    working_days_override: dict | None = None,
 ) -> tuple[pd.DataFrame, dict[tuple[int, int], str]]:
     cols_base = ["Fecha", "Dia", "Dia #"]
     if daily_df.empty:
@@ -625,7 +674,7 @@ def _build_liquidar_sheet(
             return text[:-2]
         return text
 
-    catalog, contratacion_by_id, loaded_from_file = _load_employee_catalog(base_dir)
+    catalog, contratacion_by_id, max_normal_hours_from_file, working_days_from_file, loaded_from_file = _load_employee_catalog(base_dir)
     from_daily: dict[str, str] = {}
     for _, row in working.iterrows():
         emp_id = _clean_id(row["ID de persona"])
@@ -651,7 +700,7 @@ def _build_liquidar_sheet(
             label = f"{clean_id} {clean_name}".strip() if clean_id else clean_name
             forced_employees_rows.append((clean_id, clean_name, label))
         if contratacion_sort or contratacion_required:
-            _, _forced_contratacion, _ = _load_employee_catalog(base_dir)
+            _, _forced_contratacion, _, _, _ = _load_employee_catalog(base_dir)
             if contratacion_required:
                 forced_employees_rows = [
                     item for item in forced_employees_rows
@@ -729,6 +778,9 @@ def _build_liquidar_sheet(
         if fill_missing_scheduled_as_absent
         else {}
     )
+    # Merge days from date.xlsx Empleados sheet (overrides schedule_info defaults)
+    if working_days_override:
+        working_days_by_employee.update(working_days_override)
 
     day_names = ["Lunes", "Martes", "Miercoles", "Jueves", "Viernes", "Sabado", "Domingo"]
     by_key: dict[tuple[pd.Timestamp, str], dict] = {}
@@ -798,7 +850,7 @@ def _build_liquidar_sheet(
         for emp_index, (emp_id, employee_name, label) in enumerate(employees, start=0):
             weekday = int(day.weekday())
             employee_working_days = working_days_by_employee.get(emp_id)
-            if emp_id in HS_RIORDA_FIXED_WORKING_DAYS_BY_ID:
+            if emp_id in HS_RIORDA_FIXED_WORKING_DAYS_BY_ID and emp_id not in (working_days_override or {}):
                 # Refuerzo operativo: Zeller siempre usa L/Mi/V, incluso si
                 # el parseo de date.xlsx cae en un default amplio.
                 if employee_working_days is None or employee_working_days == {0, 1, 2, 3, 4}:
@@ -844,8 +896,9 @@ def _build_liquidar_sheet(
             extra_minutes = int(pd.to_numeric(rec.get("Minutos extra", 0), errors="coerce") or 0)
             normal_minutes = max(0, total_minutes - extra_minutes)
             cap_minutes = None
-            if max_normal_hours_by_employee_id:
-                max_hours = max_normal_hours_by_employee_id.get(emp_id)
+            _effective_max = max_normal_hours_by_employee_id or max_normal_hours_from_file or {}
+            if _effective_max:
+                max_hours = _effective_max.get(emp_id)
                 if max_hours is not None:
                     cap_minutes = int(round(float(max_hours) * 60))
                     # hs-riorda: considerar normales las horas reales hasta el tope diario,
@@ -1311,6 +1364,10 @@ def export_report(
     output.parent.mkdir(parents=True, exist_ok=True)
     temp_output = output.with_suffix(f"{output.suffix}.tmp")
 
+    # Load employee catalog once so max_normal_hours is available for formatting
+    _, _, _export_max_normal_hours, _export_working_days, _ = _load_employee_catalog(output.parent)
+    _effective_max_normal = _export_max_normal_hours if _export_max_normal_hours else HS_RIORDA_MAX_NORMAL_HOURS_BY_ID
+
     diario_export = _sort_for_report(daily_df.copy(), SHEET_LAYOUTS["Diario"]["priority_sort"])
     mensual_export = _sort_for_report(monthly_df.copy(), SHEET_LAYOUTS["Mensual"]["priority_sort"])
     tardanzas_export = _build_tardanzas_sheet(diario_export)
@@ -1329,13 +1386,14 @@ def export_report(
         include_saturdays_with_attendance=False,
         include_extra_summary_rows=True,
         include_total_extra_row=True,
-        max_normal_hours_by_employee_id=HS_RIORDA_MAX_NORMAL_HOURS_BY_ID,
+        max_normal_hours_by_employee_id=_effective_max_normal,
         ignore_tardiness_for_normal_hours=True,
         include_weekly_common_rows=True,
         include_weekly_extra_rows=True,
         fill_missing_scheduled_as_absent=True,
         weekly_common_cap_minutes=44 * 60,
         include_blank_row_after_quincena=True,
+        working_days_override=_export_working_days if _export_working_days else None,
     )
     try:
         with pd.ExcelWriter(temp_output, engine="openpyxl") as writer:
@@ -1372,7 +1430,7 @@ def export_report(
                 hs_riorda_status_cells,
                 avoid_dark_green=True,
                 highlight_below_daily_target=True,
-                daily_target_hours_by_employee_id=HS_RIORDA_MAX_NORMAL_HOURS_BY_ID,
+                daily_target_hours_by_employee_id=_effective_max_normal,
             )
 
         temp_output.replace(output)

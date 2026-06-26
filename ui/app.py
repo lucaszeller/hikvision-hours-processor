@@ -2462,6 +2462,7 @@ class HikvisionApp(ctk.CTk):
         ("corrido",     "H. Corrido",   90,  "center", "Horario corrido"),
         ("dias",        "Días",         60,  "center", "Dias"),
         ("grupo",       "Grupo",        70,  "center", "grupo"),
+        ("hs_normal",   "Hs. Normales", 90,  "center", "Horas normales"),
     ]
 
     def _build_employees_page(self, parent: ctk.CTkFrame) -> ctk.CTkFrame:
@@ -2488,12 +2489,21 @@ class HikvisionApp(ctk.CTk):
         body = ctk.CTkFrame(page, corner_radius=0, fg_color="transparent")
         body.grid(row=1, column=0, sticky="nsew", padx=18, pady=12)
         body.grid_columnconfigure(0, weight=1)
-        body.grid_rowconfigure(0, weight=1)
+        body.grid_rowconfigure(0, weight=0)
+        body.grid_rowconfigure(1, weight=1)
+
+        # Search bar
+        self._emp_search_var = ctk.StringVar()
+        self._emp_search_var.trace_add("write", lambda *_: self._emp_filter())
+        search_entry = ctk.CTkEntry(body, textvariable=self._emp_search_var,
+                                     placeholder_text="Buscar por nombre o legajo...",
+                                     font=self.font_body, height=34, corner_radius=8)
+        search_entry.grid(row=0, column=0, sticky="ew", pady=(0, 6))
 
         # Treeview + scrollbars
         tree_frame = ctk.CTkFrame(body, corner_radius=10, fg_color=COLOR_PANEL,
                                    border_width=1, border_color=COLOR_BORDER)
-        tree_frame.grid(row=0, column=0, sticky="nsew")
+        tree_frame.grid(row=1, column=0, sticky="nsew")
         tree_frame.grid_columnconfigure(0, weight=1)
         tree_frame.grid_rowconfigure(0, weight=1)
 
@@ -2526,7 +2536,7 @@ class HikvisionApp(ctk.CTk):
 
         # ── Buttons ──────────────────────────────────────────────────────────────
         btn_bar = ctk.CTkFrame(body, fg_color="transparent")
-        btn_bar.grid(row=1, column=0, sticky="ew", pady=(10, 0))
+        btn_bar.grid(row=2, column=0, sticky="ew", pady=(10, 0))
 
         def _btn(text, cmd, primary=False):
             b = ctk.CTkButton(btn_bar, text=text, width=110, height=36,
@@ -2578,25 +2588,35 @@ class HikvisionApp(ctk.CTk):
             self._emp_status_label.configure(text=f"Error al leer: {exc}")
 
     def _emp_refresh_tree(self) -> None:
+        self._emp_tree.delete(*self._emp_tree.get_children())
         if self._emp_df is None:
             return
-        self._emp_tree.delete(*self._emp_tree.get_children())
-        for _, row in self._emp_df.iterrows():
+        q = getattr(self, "_emp_search_var", None)
+        q = q.get().strip().lower() if q else ""
+        for df_idx, row in self._emp_df.iterrows():
             vals = []
             for _, _, _, _, df_col in self._EMP_COLS:
                 v = str(row.get(df_col, "")).strip()
                 if v.lower() in {"nan", "none"}:
                     v = ""
                 vals.append(v)
-            self._emp_tree.insert("", "end", values=vals)
+            if q and not any(q in v.lower() for v in vals[:2]):
+                continue
+            self._emp_tree.insert("", "end", iid=str(df_idx), values=vals)
 
     # ── Row index helper ──────────────────────────────────────────────────────────
     def _emp_selected_index(self) -> "int | None":
-        """Return 0-based df index of selected row, or None."""
+        """Return df index of selected row (iid == str(df_index)), or None."""
         sel = self._emp_tree.selection()
         if not sel:
             return None
-        return self._emp_tree.index(sel[0])
+        try:
+            return int(sel[0])
+        except (ValueError, TypeError):
+            return None
+
+    def _emp_filter(self) -> None:
+        self._emp_refresh_tree()
 
     def _emp_add(self) -> None:
         self._emp_open_dialog(mode="add")
