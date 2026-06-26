@@ -253,7 +253,21 @@ class HikvisionApp(ctk.CTk):
             font=self.font_button,
             command=lambda: self._show_page("exceptions"),
         )
-        self.exceptions_tab_button.grid(row=0, column=2, padx=(0, 10), pady=(12, 8), sticky="w")
+        # self.exceptions_tab_button.grid(row=0, column=2, padx=(0, 6), pady=(12, 8), sticky="w")  # hidden
+
+        self.employees_tab_button = ctk.CTkButton(
+            self.navbar,
+            text="Empleados",
+            width=110,
+            height=32,
+            corner_radius=6,
+            fg_color="transparent",
+            hover_color=COLOR_SECONDARY_HOVER,
+            text_color=COLOR_TEXT_MUTED,
+            font=self.font_button,
+            command=lambda: self._show_page("employees"),
+        )
+        self.employees_tab_button.grid(row=0, column=3, padx=(0, 10), pady=(12, 8), sticky="w")
 
         self.report_indicator = ctk.CTkFrame(
             self.navbar,
@@ -271,7 +285,16 @@ class HikvisionApp(ctk.CTk):
             corner_radius=0,
             fg_color=COLOR_PRIMARY,
         )
-        self.exceptions_indicator.grid(row=1, column=2, padx=(0, 10), sticky="sw")
+        # self.exceptions_indicator.grid(row=1, column=2, padx=(0, 6), sticky="sw")  # hidden
+
+        self.employees_indicator = ctk.CTkFrame(
+            self.navbar,
+            height=3,
+            width=110,
+            corner_radius=0,
+            fg_color=COLOR_PRIMARY,
+        )
+        self.employees_indicator.grid(row=1, column=3, padx=(0, 10), sticky="sw")
 
         self._mount_logo()
 
@@ -282,15 +305,19 @@ class HikvisionApp(ctk.CTk):
 
         self.report_page = self._build_report_page(self.content)
         self.exceptions_page = self._build_exceptions_page(self.content)
+        self.employees_page = self._build_employees_page(self.content)
         self._page_frames = {
             "report": self.report_page,
-            "exceptions": self.exceptions_page,
+            # "exceptions": self.exceptions_page,  # hidden
+            "employees": self.employees_page,
         }
 
         self.report_page.place(x=0, y=0, relwidth=1, relheight=1)
-        self.exceptions_page.place(x=0, y=0, relwidth=1, relheight=1)
+        # self.exceptions_page.place(x=0, y=0, relwidth=1, relheight=1)  # hidden
+        self.employees_page.place(x=0, y=0, relwidth=1, relheight=1)
         self.report_page.lift()
         self.exceptions_page.lower()
+        self.employees_page.lower()
 
         self._reset_kpis()
         self._refresh_exceptions_summary()
@@ -401,22 +428,12 @@ class HikvisionApp(ctk.CTk):
 
     def _refresh_page_titles(self, page: str | None = None) -> None:
         active_page = page or self.current_page
-        if active_page == "report":
-            self.nav_title.configure(text="Hikvision Hours · Reporte")
-            if self.report_hero_title is not None:
-                self.report_hero_title.configure(text="Centro de Operaciones")
-            if self.report_hero_subtitle is not None:
-                self.report_hero_subtitle.configure(
-                    text="Bitacora en vivo del procesamiento, validaciones y reporte final."
-                )
-        else:
-            self.nav_title.configure(text="Hikvision Hours · Excepciones")
-            if self.report_hero_title is not None:
-                self.report_hero_title.configure(text="Centro de Operaciones")
-            if self.report_hero_subtitle is not None:
-                self.report_hero_subtitle.configure(
-                    text="Bitacora en vivo del procesamiento, validaciones y reporte final."
-                )
+        titles = {
+            "report": "Hikvision Hours · Reporte",
+            "exceptions": "Hikvision Hours · Excepciones",
+            "employees": "Hikvision Hours · Empleados",
+        }
+        self.nav_title.configure(text=titles.get(active_page, "Hikvision Hours"))
 
     def _apply_tab_visual_state(self, page: str) -> None:
         active_tab_fg = COLOR_TAB_ACTIVE
@@ -426,16 +443,18 @@ class HikvisionApp(ctk.CTk):
         active_line = COLOR_PRIMARY
         hidden_line = ("#DCE8F6", "#0E1A2B")
 
-        if page == "report":
-            self.report_tab_button.configure(fg_color=active_tab_fg, text_color=active_text)
-            self.exceptions_tab_button.configure(fg_color=inactive_tab_fg, text_color=inactive_text)
-            self.report_indicator.configure(fg_color=active_line)
-            self.exceptions_indicator.configure(fg_color=hidden_line)
-        else:
-            self.exceptions_tab_button.configure(fg_color=active_tab_fg, text_color=active_text)
-            self.report_tab_button.configure(fg_color=inactive_tab_fg, text_color=inactive_text)
-            self.exceptions_indicator.configure(fg_color=active_line)
-            self.report_indicator.configure(fg_color=hidden_line)
+        all_buttons = [
+            (self.report_tab_button, self.report_indicator, "report"),
+            # (self.exceptions_tab_button, self.exceptions_indicator, "exceptions"),  # hidden
+            (self.employees_tab_button, self.employees_indicator, "employees"),
+        ]
+        for btn, ind, name in all_buttons:
+            if name == page:
+                btn.configure(fg_color=active_tab_fg, text_color=active_text)
+                ind.configure(fg_color=active_line)
+            else:
+                btn.configure(fg_color=inactive_tab_fg, text_color=inactive_text)
+                ind.configure(fg_color=hidden_line)
 
     def _finish_page_transition(self, target_page: str, outgoing_page: str) -> None:
         target_frame = self._page_frames[target_page]
@@ -2429,3 +2448,446 @@ class HikvisionApp(ctk.CTk):
         )
         self._worker_thread.start()
         self.after(120, self._poll_worker)
+
+    # ── EMPLOYEES PAGE ─────────────────────────────────────────────────────────
+    # Column spec: (col_id, heading, width, anchor, df_col_name)
+    _EMP_COLS = [
+        ("id",          "Legajo",       70,  "center", "Id"),
+        ("nombre",      "Nombre",       220, "w",      "Nombre"),
+        ("ing_m",       "Ing. Mañana",  90,  "center", "horario ingreso Mañana"),
+        ("sal_m",       "Sal. Mañana",  90,  "center", "Horario salida Mañana"),
+        ("ing_t",       "Ing. Tarde",   90,  "center", "Horario Ingreso Tarde"),
+        ("sal_t",       "Sal. Tarde",   90,  "center", "Horario Salida Tarde"),
+        ("contrat",     "Contratación", 110, "center", "Contratacion"),
+        ("corrido",     "H. Corrido",   90,  "center", "Horario corrido"),
+        ("dias",        "Días",         60,  "center", "Dias"),
+        ("grupo",       "Grupo",        70,  "center", "grupo"),
+    ]
+
+    def _build_employees_page(self, parent: ctk.CTkFrame) -> ctk.CTkFrame:
+        import tkinter.ttk as ttk
+
+        page = ctk.CTkFrame(parent, corner_radius=0, fg_color=COLOR_BG)
+        page.grid_columnconfigure(0, weight=1)
+        page.grid_rowconfigure(1, weight=1)
+
+        # ── Header ──────────────────────────────────────────────────────────────
+        header = ctk.CTkFrame(page, corner_radius=0, fg_color=COLOR_PANEL, height=56,
+                               border_width=1, border_color=COLOR_BORDER)
+        header.grid(row=0, column=0, sticky="ew")
+        header.grid_propagate(False)
+        header.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(header, text="Gestión de Empleados",
+                     font=ctk.CTkFont(size=15, weight="bold"),
+                     text_color=COLOR_TEXT).grid(row=0, column=0, padx=18, pady=16, sticky="w")
+        self._emp_status_label = ctk.CTkLabel(header, text="", font=self.font_body,
+                                               text_color=COLOR_TEXT_MUTED)
+        self._emp_status_label.grid(row=0, column=1, padx=12, sticky="e")
+
+        # ── Body ─────────────────────────────────────────────────────────────────
+        body = ctk.CTkFrame(page, corner_radius=0, fg_color="transparent")
+        body.grid(row=1, column=0, sticky="nsew", padx=18, pady=12)
+        body.grid_columnconfigure(0, weight=1)
+        body.grid_rowconfigure(0, weight=1)
+
+        # Treeview + scrollbars
+        tree_frame = ctk.CTkFrame(body, corner_radius=10, fg_color=COLOR_PANEL,
+                                   border_width=1, border_color=COLOR_BORDER)
+        tree_frame.grid(row=0, column=0, sticky="nsew")
+        tree_frame.grid_columnconfigure(0, weight=1)
+        tree_frame.grid_rowconfigure(0, weight=1)
+
+        style = ttk.Style()
+        style.theme_use("default")
+        style.configure("Emp.Treeview",
+                        background="#FFFFFF", foreground="#0F172A",
+                        fieldbackground="#FFFFFF", rowheight=30,
+                        font=("Segoe UI", 11))
+        style.configure("Emp.Treeview.Heading",
+                        background="#EEF3F8", foreground="#475569",
+                        font=("Segoe UI", 10, "bold"), relief="flat")
+        style.map("Emp.Treeview",
+                  background=[("selected", "#E0F2FE")],
+                  foreground=[("selected", "#0C4A6E")])
+
+        col_ids = [c[0] for c in self._EMP_COLS]
+        self._emp_tree = ttk.Treeview(tree_frame, columns=col_ids, show="headings",
+                                       style="Emp.Treeview", selectmode="browse")
+        for col_id, heading, width, anchor, _ in self._EMP_COLS:
+            self._emp_tree.heading(col_id, text=heading)
+            self._emp_tree.column(col_id, width=width, minwidth=50, anchor=anchor)
+
+        vsb = ttk.Scrollbar(tree_frame, orient="vertical",   command=self._emp_tree.yview)
+        hsb = ttk.Scrollbar(tree_frame, orient="horizontal", command=self._emp_tree.xview)
+        self._emp_tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        self._emp_tree.grid(row=0, column=0, sticky="nsew", padx=(6, 0), pady=(6, 0))
+        vsb.grid(row=0, column=1, sticky="ns",  pady=(6, 0), padx=(0, 4))
+        hsb.grid(row=1, column=0, sticky="ew",  padx=(6, 0), pady=(0, 4))
+
+        # ── Buttons ──────────────────────────────────────────────────────────────
+        btn_bar = ctk.CTkFrame(body, fg_color="transparent")
+        btn_bar.grid(row=1, column=0, sticky="ew", pady=(10, 0))
+
+        def _btn(text, cmd, primary=False):
+            b = ctk.CTkButton(btn_bar, text=text, width=110, height=36,
+                               corner_radius=8, font=self.font_button, command=cmd)
+            if primary:
+                self._style_primary_button(b)
+            else:
+                self._style_secondary_button(b)
+            return b
+
+        _btn("➕ Agregar",  self._emp_add).pack(side="left", padx=(0, 8))
+        _btn("✏️ Editar",   self._emp_edit).pack(side="left", padx=(0, 8))
+        _btn("🗑️ Eliminar", self._emp_delete).pack(side="left", padx=(0, 16))
+        _btn("💾 Guardar",  self._emp_save, primary=True).pack(side="left")
+
+        # ── Internal state ────────────────────────────────────────────────────────
+        self._emp_df: "pd.DataFrame | None" = None
+        self._emp_dirty = False
+
+        page.bind("<Visibility>", lambda e: self._emp_load())
+        self.after(200, self._emp_load)
+        return page
+
+    def _emp_date_path(self) -> "Path | None":
+        base = get_app_base_dir()
+        for candidate in [
+            base / "date.xlsx",
+            Path("date.xlsx"),
+            base / "dist" / "date.xlsx",
+        ]:
+            if candidate.exists():
+                return candidate
+        return None
+
+    def _emp_load(self) -> None:
+        path = self._emp_date_path()
+        if path is None:
+            self._emp_status_label.configure(text="⚠ No se encontró date.xlsx")
+            return
+        try:
+            df = pd.read_excel(path, sheet_name="Empleados", dtype=str)
+            df = df.fillna("")
+            self._emp_df = df
+            self._emp_refresh_tree()
+            self._emp_dirty = False
+            self._emp_status_label.configure(
+                text=f"Cargado: {path.name}  ({len(df)} empleados)")
+        except Exception as exc:
+            self._emp_status_label.configure(text=f"Error al leer: {exc}")
+
+    def _emp_refresh_tree(self) -> None:
+        if self._emp_df is None:
+            return
+        self._emp_tree.delete(*self._emp_tree.get_children())
+        for _, row in self._emp_df.iterrows():
+            vals = []
+            for _, _, _, _, df_col in self._EMP_COLS:
+                v = str(row.get(df_col, "")).strip()
+                if v.lower() in {"nan", "none"}:
+                    v = ""
+                vals.append(v)
+            self._emp_tree.insert("", "end", values=vals)
+
+    # ── Row index helper ──────────────────────────────────────────────────────────
+    def _emp_selected_index(self) -> "int | None":
+        """Return 0-based df index of selected row, or None."""
+        sel = self._emp_tree.selection()
+        if not sel:
+            return None
+        return self._emp_tree.index(sel[0])
+
+    def _emp_add(self) -> None:
+        self._emp_open_dialog(mode="add")
+
+    def _emp_edit(self) -> None:
+        idx = self._emp_selected_index()
+        if idx is None:
+            messagebox.showwarning("Editar", "Seleccioná un empleado primero.")
+            return
+        row = self._emp_df.iloc[idx]
+        current = {}
+        for _, _, _, _, df_col in self._EMP_COLS:
+            v = str(row.get(df_col, "")).strip()
+            if v.lower() in {"nan", "none"}:
+                v = ""
+            current[df_col] = v
+        self._emp_open_dialog(mode="edit", df_index=idx, current=current)
+
+    def _emp_delete(self) -> None:
+        idx = self._emp_selected_index()
+        if idx is None:
+            messagebox.showwarning("Eliminar", "Seleccioná un empleado primero.")
+            return
+        row = self._emp_df.iloc[idx]
+        nombre = str(row.get("Nombre", "")).strip()
+        emp_id = str(row.get("Id", "")).strip()
+        if not messagebox.askyesno("Confirmar", f"¿Eliminar a {nombre} (ID {emp_id})?"):
+            return
+        self._emp_df = self._emp_df.drop(index=idx).reset_index(drop=True)
+        self._emp_refresh_tree()
+        self._emp_dirty = True
+        self._emp_status_label.configure(text=f"Eliminado: {nombre} — guardá para confirmar")
+
+    # ── Días helpers ──────────────────────────────────────────────────────────────
+    _DIAS_LIST = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
+    _DIAS_KEYS  = ["lunes", "martes", "mi",        "jueves", "viernes", "sab",    "dom"]
+
+    @staticmethod
+    def _dias_parse(raw: str) -> set[str]:
+        """Return set of day names (from _DIAS_LIST) present in raw string."""
+        r = raw.lower()
+        result: set[str] = set()
+        # "lunes a viernes" → first 5 days
+        if "a viernes" in r or "a vier" in r:
+            result.update(["Lunes", "Martes", "Miércoles", "Jueves", "Viernes"])
+        if "a s" in r or "sabado" in r or "sábado" in r:
+            result.update(["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado"])
+        # individual mentions
+        if "lunes"     in r: result.add("Lunes")
+        if "martes"    in r: result.add("Martes")
+        if "mi"        in r and ("mier" in r or "miérc" in r or "miérc" in r or "miércoles" in r or "miercoles" in r): result.add("Miércoles")
+        if "jueves"    in r: result.add("Jueves")
+        if "viernes"   in r: result.add("Viernes")
+        if "s" in r    and ("sab" in r or "sáb" in r): result.add("Sábado")
+        if "domingo"   in r: result.add("Domingo")
+        return result
+
+    @staticmethod
+    def _dias_format(selected: list[str]) -> str:
+        """Convert selected day names to a natural-language string."""
+        wdays = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes"]
+        ordered = [d for d in ["Lunes","Martes","Miércoles","Jueves","Viernes","Sábado","Domingo"]
+                   if d in selected]
+        if not ordered:
+            return ""
+        if ordered == wdays:
+            return "lunes a viernes"
+        if ordered == wdays + ["Sábado"]:
+            return "lunes a sábado"
+        if ordered == ["Lunes","Martes","Miércoles","Jueves","Viernes","Sábado","Domingo"]:
+            return "todos los días"
+        # comma list
+        low = [d.lower() for d in ordered]
+        if len(low) == 1:
+            return low[0]
+        return ", ".join(low[:-1]) + " y " + low[-1]
+
+    def _emp_open_dialog(self, mode: str, df_index: "int | None" = None,
+                          current: "dict | None" = None) -> None:
+        import tkinter as tk
+
+        cur = current or {}
+        dlg = ctk.CTkToplevel(self)
+        dlg.title("Agregar empleado" if mode == "add" else "Editar empleado")
+        dlg.geometry("440x620")
+        dlg.resizable(False, True)
+        dlg.grab_set()
+        dlg.configure(fg_color=COLOR_PANEL)
+
+        # Scrollable inner frame
+        scroll = ctk.CTkScrollableFrame(dlg, fg_color="transparent")
+        scroll.pack(fill="both", expand=True, padx=20, pady=(16, 4))
+
+        entries: dict = {}
+
+        # Collect existing grupo values for the combo
+        existing_grupos: list[str] = []
+        if self._emp_df is not None and "grupo" in self._emp_df.columns:
+            vals = self._emp_df["grupo"].dropna().astype(str).str.strip()
+            existing_grupos = sorted({v for v in vals if v and v.lower() not in {"nan","none"}})
+
+        for _, heading, _, _, df_col in self._EMP_COLS:
+            ctk.CTkLabel(scroll, text=heading, font=self.font_body,
+                         text_color=COLOR_TEXT_MUTED, anchor="w").pack(fill="x", pady=(6, 1))
+            default_val = cur.get(df_col, "")
+
+            # ── Contratacion: fixed dropdown ────────────────────────────────────
+            if df_col == "Contratacion":
+                w = ctk.CTkComboBox(scroll, values=["", "Quincenal", "Mensual"],
+                                    font=self.font_body, height=34, state="readonly")
+                w.set(default_val)
+                w.pack(fill="x")
+                entries[df_col] = w
+
+            # ── Horario corrido: SI / NO dropdown ──────────────────────────────
+            elif df_col == "Horario corrido":
+                w = ctk.CTkComboBox(scroll, values=["", "SI", "NO"],
+                                    font=self.font_body, height=34, state="readonly")
+                w.set(default_val.upper() if default_val.upper() in {"SI","NO"} else "")
+                w.pack(fill="x")
+                entries[df_col] = w
+
+            # ── Dias: individual checkboxes ─────────────────────────────────────
+            elif df_col == "Dias":
+                checked = self._dias_parse(default_val)
+                day_vars: dict[str, ctk.BooleanVar] = {}
+                days_frame = ctk.CTkFrame(scroll, fg_color="#F1F5F9", corner_radius=8)
+                days_frame.pack(fill="x", pady=(0, 2))
+                for day in self._DIAS_LIST:
+                    var = ctk.BooleanVar(value=(day in checked))
+                    cb = ctk.CTkCheckBox(days_frame, text=day, variable=var,
+                                         font=self.font_body, text_color=COLOR_TEXT,
+                                         fg_color=COLOR_PRIMARY)
+                    cb.pack(anchor="w", padx=12, pady=3)
+                    day_vars[day] = var
+                entries[df_col] = day_vars   # special: dict of BooleanVar
+
+            # ── Grupo: editable combo with existing values ──────────────────────
+            elif df_col == "grupo":
+                w = ctk.CTkComboBox(scroll, values=existing_grupos or [""],
+                                    font=self.font_body, height=34)
+                w.set(default_val)
+                w.pack(fill="x")
+                entries[df_col] = w
+
+            # ── Default: plain text entry ───────────────────────────────────────
+            else:
+                e = ctk.CTkEntry(scroll, font=self.font_body, height=34)
+                e.pack(fill="x")
+                if default_val:
+                    e.insert(0, default_val)
+                entries[df_col] = e
+
+        def _get(df_col: str) -> str:
+            widget = entries[df_col]
+            if df_col == "Dias":
+                # dict of BooleanVar
+                selected = [d for d in self._DIAS_LIST if widget[d].get()]
+                return self._dias_format(selected)
+            return widget.get().strip()
+
+        def _confirm():
+            emp_id = _get("Id")
+            nombre  = _get("Nombre")
+            if not emp_id or not nombre:
+                messagebox.showwarning("Datos incompletos",
+                                       "Legajo y Nombre son obligatorios.", parent=dlg)
+                return
+
+            if self._emp_df is None:
+                self._emp_df = pd.DataFrame(columns=[c[4] for c in self._EMP_COLS])
+
+            new_vals = {df_col: _get(df_col) for _, _, _, _, df_col in self._EMP_COLS}
+
+            if mode == "edit" and df_index is not None:
+                for df_col, val in new_vals.items():
+                    if df_col in self._emp_df.columns:
+                        self._emp_df.at[df_index, df_col] = val
+            else:
+                row_dict = {col: "" for col in self._emp_df.columns}
+                row_dict.update(new_vals)
+                self._emp_df = pd.concat(
+                    [self._emp_df, pd.DataFrame([row_dict])], ignore_index=True
+                )
+
+            self._emp_refresh_tree()
+            self._emp_dirty = True
+            self._emp_status_label.configure(text="Cambios pendientes - guarda para confirmar")
+            dlg.destroy()
+
+        btn_row = ctk.CTkFrame(dlg, fg_color="transparent")
+        btn_row.pack(fill="x", padx=20, pady=(4, 14))
+        cancel_btn = ctk.CTkButton(btn_row, text="Cancelar", width=100, height=34,
+                                    font=self.font_button, command=dlg.destroy)
+        self._style_secondary_button(cancel_btn)
+        cancel_btn.pack(side="left")
+        confirm_btn = ctk.CTkButton(btn_row, text="Confirmar", width=120, height=34,
+                                     font=self.font_button, command=_confirm)
+        self._style_primary_button(confirm_btn)
+        confirm_btn.pack(side="right")
+
+    def _emp_save(self) -> None:
+        if self._emp_df is None:
+            messagebox.showwarning("Guardar", "No hay datos cargados.")
+            return
+        path = self._emp_date_path()
+        if path is None:
+            messagebox.showerror("Guardar", "No se encontro date.xlsx.")
+            return
+        try:
+            from openpyxl import load_workbook
+            from openpyxl.worksheet.table import Table, TableStyleInfo
+            from openpyxl.utils import get_column_letter
+
+            # Column widths from the template
+            _COL_WIDTHS = [10.0, 28.0, 18.0, 13.0, 13.0, 13.0, 18.0, 16.0, 22.3, 20.0]
+
+            # Remove read-only attribute if set (Windows copies can set it)
+            import os as _os
+            try:
+                _os.chmod(path, 0o644)
+            except Exception:
+                pass
+
+            wb = load_workbook(path)
+            ws = wb["Empleados"]
+
+            # Read header from existing sheet to preserve column order
+            n_cols = ws.max_column
+            header = [ws.cell(1, c).value for c in range(1, n_cols + 1)]
+
+            # Remove existing tables so we can re-add with correct ref
+            for tbl_name in list(ws.tables.keys()):
+                del ws.tables[tbl_name]
+
+            # Delete all data rows (keep header row 1)
+            if ws.max_row > 1:
+                ws.delete_rows(2, ws.max_row - 1)
+
+            # Write new data rows
+            df = self._emp_df.copy().fillna("")
+            for r_idx, (_, row) in enumerate(df.iterrows(), start=2):
+                for c_idx, col_name in enumerate(header, start=1):
+                    val = str(row.get(col_name, "")).strip() if col_name else ""
+                    if val.lower() in {"nan", "none"}:
+                        val = ""
+                    cell = ws.cell(r_idx, c_idx)
+                    if col_name == "Id" and val.isdigit():
+                        cell.value = int(val)
+                    else:
+                        cell.value = val or None
+
+            # Rebuild Excel Table with correct ref
+            n_data = len(df)
+            last_row = 1 + n_data
+            last_col = get_column_letter(n_cols)
+            tbl = Table(displayName="TablaEmpleados", ref=f"A1:{last_col}{last_row}")
+            tbl.tableStyleInfo = TableStyleInfo(
+                name="TableStyleMedium2",
+                showFirstColumn=False,
+                showLastColumn=False,
+                showRowStripes=True,
+                showColumnStripes=False,
+            )
+            ws.add_table(tbl)
+
+            # Restore column widths
+            for i, w in enumerate(_COL_WIDTHS, start=1):
+                ws.column_dimensions[get_column_letter(i)].width = w
+
+            try:
+                wb.save(path)
+            except PermissionError:
+                # File locked (Excel open) - save to a temp copy instead
+                from datetime import datetime
+                ts = datetime.now().strftime("%H%M%S")
+                tmp = path.parent / ("date_guardado_" + ts + ".xlsx")
+                wb.save(tmp)
+                messagebox.showwarning(
+                    "Archivo en uso",
+                    "date.xlsx esta abierto en Excel y no se pudo sobreescribir.\n\n"
+                    "Se guardo una copia en:\n" + tmp.name + "\n\n"
+                    "Cerra Excel y renombrala a date.xlsx."
+                )
+                self._emp_dirty = False
+                self._emp_status_label.configure(
+                    text="Guardado en copia temporal: " + tmp.name)
+                return
+
+            self._emp_dirty = False
+            self._emp_status_label.configure(
+                text=f"Guardado en {path.name}  ({n_data} empleados)")
+        except Exception as exc:
+            messagebox.showerror("Error al guardar", str(exc))

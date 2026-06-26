@@ -884,7 +884,7 @@ def _build_liquidar_sheet(
 
     def _append_week_row(week_index: int, minutes_by_employee: dict[str, int], metric: str) -> None:
         nonlocal excel_row
-        week_row: dict[str, object] = {"Fecha": "", "Dia": f"Total Semana {week_index} - {metric}", "Dia #": ""}
+        week_row: dict[str, object] = {"Fecha": "", "Dia": f"Total Semana - {metric}", "Dia #": ""}
         for _, _, emp_label in employees:
             week_row[emp_label] = _hours(minutes_by_employee[emp_label])
         rows.append(week_row)
@@ -1128,22 +1128,25 @@ def _apply_liquidar_format(
 
 def _append_liquidar_legend(worksheet, avoid_dark_green: bool = False) -> None:
     legend_items = [
-        ("Domingo", "domingo"),
-        ("Ausente", "ausente"),
-        ("Vacaciones", "vacaciones"),
-        ("Estudiar", "estudiar"),
-        ("Capacitacion", "capacitacion"),
-        ("Suspencion", "suspencion"),
-        ("No trabajado", "no trabajado"),
-        ("Licencia", "licencia"),
-        ("Feriado", "feriado"),
-        ("Accidente de trabajo", "accidente de trabajo"),
-        ("Tardanza", "tardanza"),
+        ("Domingo",        "domingo"),
+        ("Ausencia",       "ausente"),
+        ("Vacaciones",     "vacaciones"),
+        ("Estudiar",       "estudiar"),
+        ("Capacitaciones", "capacitacion"),
+        ("Suspension",     "suspencion"),
+        ("No trabajado",   "no trabajado"),
+        ("Licencia",       "licencia"),
+        ("Feriado",        "feriado"),
+        ("Accidente",      "accidente de trabajo"),
+        ("Tardanza",       "tardanza"),
     ]
 
+    ITEMS_PER_ROW = 4
     start_row = worksheet.max_row + 2
+
+    # Title row
     title_cell = worksheet.cell(row=start_row, column=1)
-    title_cell.value = "Leyenda de estados"
+    title_cell.value = "Leyenda Rapida de Estados"
     title_cell.fill = HEADER_FILL
     title_cell.font = HEADER_FONT
     title_cell.alignment = Alignment(horizontal="left", vertical="center")
@@ -1152,8 +1155,30 @@ def _append_liquidar_legend(worksheet, avoid_dark_green: bool = False) -> None:
         start_row=start_row,
         start_column=1,
         end_row=start_row,
-        end_column=4,
+        end_column=ITEMS_PER_ROW,
     )
+    worksheet.row_dimensions[start_row].height = 22
+
+    # Legend items in a grid
+    for idx, (label, status_key) in enumerate(legend_items):
+        row = start_row + 1 + (idx // ITEMS_PER_ROW)
+        col = 1 + (idx % ITEMS_PER_ROW)
+        style = _status_style(status_key)
+        cell = worksheet.cell(row=row, column=col)
+        cell.value = label
+        if style["fill"]:
+            cell.fill = style["fill"]
+        if style["font"]:
+            cell.font = Font(
+                color=style["font"].color.rgb if style["font"].color else "000000",
+                bold=True,
+                size=10,
+            )
+        else:
+            cell.font = Font(size=10, bold=False)
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+        cell.border = THIN_BORDER
+        worksheet.row_dimensions[row].height = 20
 
 def _apply_incidencias_format(worksheet, summary_rows: int, detail_header_row: int) -> None:
     headers_row_1 = [cell.value for cell in worksheet[1]]
