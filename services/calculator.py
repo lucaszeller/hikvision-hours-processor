@@ -43,7 +43,7 @@ INCONSISTENCIAS_COLUMNS = [
 SATURDAY_START_MINUTE = 7 * 60 + 30
 SATURDAY_END_MINUTE = 11 * 60 + 30
 
-# Tipos de excepción que cuentan 8hs (480 min) en lugar del horario configurado.
+# Tipos de excepción que cuentan 9hs (540 min). No se computan hacia el tope semanal de 44hs.
 # Se comparan en minúsculas y por contenido parcial.
 EIGHT_HOUR_EXCEPTION_KEYWORDS = {
     "vacacion",       # cubre "vacaciones", "vacación", "vacaciones anuales", etc.
@@ -57,10 +57,10 @@ EIGHT_HOUR_EXCEPTION_KEYWORDS = {
     "viaje",          # cubre "viajes", "viaje de trabajo", etc.
     "ausencia",       # ausencia aprobada (paid_day=True) paga 8hs.
 }
-EIGHT_HOUR_EXCEPTION_MINUTES = 8 * 60  # 480
+EIGHT_HOUR_EXCEPTION_MINUTES = 9 * 60  # 540
 
 
-def _is_eight_hour_exception(exception_types: list[str]) -> bool:
+def _is_exception_day_type(exception_types: list[str]) -> bool:
     """Retorna True si alguno de los tipos de excepción corresponde a jornada de 8hs."""
     for exc_type in exception_types:
         normalized = exc_type.strip().lower()
@@ -1153,7 +1153,7 @@ def _build_daily_rows(
             if apply_presente:
                 paid_minutes = int(scheduled_minutes) if int(scheduled_minutes) > 0 else 0
             elif paid_exception and int(scheduled_minutes) > 0:
-                if _is_eight_hour_exception(exception_types):
+                if _is_exception_day_type(exception_types):
                     paid_minutes = EIGHT_HOUR_EXCEPTION_MINUTES
                 else:
                     paid_minutes = int(scheduled_minutes)
